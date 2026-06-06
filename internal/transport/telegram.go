@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -72,24 +71,24 @@ func (t *TelegramTransport) handleCommand(msg *tgbotapi.Message) {
 
 	switch msg.Command() {
 	case "start":
-		t.sendMessage(chatID, "🤖 *XLI Bot* запущен!\n\nИспользуй `/oa <запрос>` или просто пиши.")
+		t.sendMessage(chatID, "XLI Bot started!\n\nUse `/oa <query>` or just text me.")
 
 	case "help":
-		help := "📋 *Команды:*\n" +
-			"`/oa <запрос>` — спросить агента\n" +
-			"`/clear` — очистить память\n" +
-			"`/skills` — список скиллов\n" +
-			"`/mcp` — статус MCP\n" +
-			"`/status` — статус бота\n\n" +
-			"Просто пиши текст — я отвечу."
+		help := "Commands:\n" +
+			"`/oa <query>` - ask agent\n" +
+			"`/clear` - clear memory\n" +
+			"`/skills` - list skills\n" +
+			"`/mcp` - MCP status\n" +
+			"`/status` - bot status\n\n" +
+			"Just text me - I will respond."
 		t.sendMessage(chatID, help)
 
 	case "clear":
 		t.agent.Memory.ClearHistory(chatID)
-		t.sendMessage(chatID, "🧹 *Память очищена!*")
+		t.sendMessage(chatID, "Memory cleared!")
 
 	case "status":
-		t.sendMessage(chatID, "✅ *Бот работает*\n💾 SQLite подключена")
+		t.sendMessage(chatID, "Bot running\nSQLite connected")
 
 	case "skills":
 		t.handleSkillsCommand(chatID)
@@ -100,13 +99,13 @@ func (t *TelegramTransport) handleCommand(msg *tgbotapi.Message) {
 	case "oa":
 		query := msg.CommandArguments()
 		if query == "" {
-			t.sendMessage(chatID, "❌ Укажи запрос: `/oa напиши код на Go`")
+			t.sendMessage(chatID, "Usage: `/oa write Go code`")
 			return
 		}
 		t.processAgentRequest(chatID, query)
 
 	default:
-		t.sendMessage(chatID, "❓ Неизвестная команда. `/help`")
+		t.sendMessage(chatID, "Unknown command. Use `/help`")
 	}
 }
 
@@ -119,16 +118,16 @@ func (t *TelegramTransport) handleSkillsCommand(chatID int64) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString("📚 *Скиллы:*\n\n")
+	sb.WriteString("Skills:\n\n")
 	for _, s := range all {
-		status := "⚪"
+		status := "o"
 		if activeMap[s.Name] {
-			status = "🟢"
+			status = "+"
 		}
 		if s.TriggerMode == "always" {
-			status = "🔒"
+			status = "*"
 		}
-		sb.WriteString(fmt.Sprintf("%s `%s` (%s)\n", status, s.Name, s.TriggerMode))
+		sb.WriteString(fmt.Sprintf("%s %s (%s)\n", status, s.Name, s.TriggerMode))
 	}
 	t.sendMessage(chatID, sb.String())
 }
@@ -136,12 +135,12 @@ func (t *TelegramTransport) handleSkillsCommand(chatID int64) {
 func (t *TelegramTransport) handleMCPCommand(chatID int64) {
 	tools := t.agent.MCP.ListAllTools()
 	var sb strings.Builder
-	sb.WriteString("📦 *MCP тулы:*\n\n")
+	sb.WriteString("MCP tools:\n\n")
 	if len(tools) == 0 {
-		sb.WriteString("_Нет подключенных серверов_")
+		sb.WriteString("No servers connected")
 	} else {
 		for _, tool := range tools {
-			sb.WriteString(fmt.Sprintf("• `%s` — %s\n", tool.Name, tool.Description))
+			sb.WriteString(fmt.Sprintf("- %s: %s\n", tool.Name, tool.Description))
 		}
 	}
 	t.sendMessage(chatID, sb.String())
@@ -151,12 +150,11 @@ func (t *TelegramTransport) processAgentRequest(chatID int64, text string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	// "Думаю..."
-	thinkMsg, _ := t.sendMessage(chatID, "⏳ *Думаю...*")
+	thinkMsg, _ := t.sendMessage(chatID, "Thinking...")
 
 	result, err := t.agent.Run(ctx, chatID, text)
 	if err != nil {
-		t.editMessage(chatID, thinkMsg.MessageID, "❌ *Ошибка:* "+utils.EscapeMarkdownV2(err.Error()))
+		t.editMessage(chatID, thinkMsg.MessageID, "Error: "+utils.EscapeMarkdownV2(err.Error()))
 		return
 	}
 
@@ -164,11 +162,10 @@ func (t *TelegramTransport) processAgentRequest(chatID int64, text string) {
 	tokenInfo := utils.FormatTokenUsage(result.InputTokens, result.OutputTokens, result.TotalTokens)
 	finalText := response + "\n\n" + tokenInfo
 
-	// Inline кнопки
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🧹 Очистить", fmt.Sprintf("action:clear:%d", chatID)),
-			tgbotapi.NewInlineKeyboardButtonData("🔃 Ещё раз", fmt.Sprintf("action:regen:%d:%s", chatID, utils.EscapeMarkdownV2(text))),
+			tgbotapi.NewInlineKeyboardButtonData("Clear", fmt.Sprintf("action:clear:%d", chatID)),
+			tgbotapi.NewInlineKeyboardButtonData("Regen", fmt.Sprintf("action:regen:%d:%s", chatID, utils.EscapeMarkdownV2(text))),
 		),
 	)
 
@@ -204,7 +201,7 @@ func (t *TelegramTransport) handleCallback(query *tgbotapi.CallbackQuery) {
 		switch parts[1] {
 		case "clear":
 			t.agent.Memory.ClearHistory(chatID)
-			t.editMessage(chatID, msgID, "🧹 *Память очищена!*")
+			t.editMessage(chatID, msgID, "Memory cleared!")
 		case "regen":
 			if len(parts) >= 3 {
 				originalText := strings.Join(parts[2:], ":")
@@ -225,12 +222,12 @@ func (t *TelegramTransport) ShowConfirmation(chatID int64, msgID int, toolName s
 	t.mu.Unlock()
 
 	argsStr := formatArgs(args)
-	text := fmt.Sprintf("⚠️ *Подтверди действие:*\n\n*Тул:* `%s`\n*Аргументы:*\n%s\n\nВыполнить?", toolName, argsStr)
+	text := fmt.Sprintf("Confirm action:\n\nTool: %s\nArgs:\n%s\n\nExecute?", toolName, argsStr)
 
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("✅ Выполнить", fmt.Sprintf("confirm:yes:%s", token)),
-			tgbotapi.NewInlineKeyboardButtonData("❌ Отмена", fmt.Sprintf("confirm:no:%s", token)),
+			tgbotapi.NewInlineKeyboardButtonData("Yes", fmt.Sprintf("confirm:yes:%s", token)),
+			tgbotapi.NewInlineKeyboardButtonData("No", fmt.Sprintf("confirm:no:%s", token)),
 		),
 	)
 
@@ -253,7 +250,7 @@ func (t *TelegramTransport) ShowConfirmation(chatID int64, msgID int, toolName s
 func formatArgs(args map[string]interface{}) string {
 	var parts []string
 	for k, v := range args {
-		parts = append(parts, fmt.Sprintf("  • `%s`: `%v`", k, v))
+		parts = append(parts, fmt.Sprintf("  - %s: %v", k, v))
 	}
 	return strings.Join(parts, "\n")
 }
