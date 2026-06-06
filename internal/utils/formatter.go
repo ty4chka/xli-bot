@@ -1,3 +1,4 @@
+// internal/utils/formatter.go (фикс)
 package utils
 
 import (
@@ -10,7 +11,7 @@ import (
 func EscapeMarkdownV2(text string) string {
 	chars := []string{"_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"}
 	for _, char := range chars {
-		text = strings.ReplaceAll(text, char, "\"+char)
+		text = strings.ReplaceAll(text, char, "\\"+char)
 	}
 	return text
 }
@@ -32,9 +33,6 @@ func FormatResponse(text string) string {
 		inner := text[idx+2 : endIdx]
 		text = text[:idx] + "*" + inner + "*" + text[endIdx+2:]
 	}
-
-	// Code blocks
-	text = strings.ReplaceAll(text, "```", "```")
 
 	return text
 }
@@ -72,8 +70,7 @@ func EditFormatted(bot *tgbotapi.BotAPI, chatID int64, msgID int, text string) e
 func splitMessage(text string, maxLen int) []string {
 	var parts []string
 	for len(text) > maxLen {
-		idx := strings.LastIndex(text[:maxLen], "
-")
+		idx := strings.LastIndex(text[:maxLen], "\n")
 		if idx == -1 {
 			idx = maxLen
 		}
