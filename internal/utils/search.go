@@ -1,3 +1,4 @@
+// internal/utils/search.go (фикс)
 package utils
 
 import (
@@ -61,17 +62,14 @@ func WebFetch(ctx context.Context, pageURL string) (string, error) {
 
 	content := string(body)
 	if len(content) > 10000 {
-		content = content[:10000] + "
-
-...[truncated]"
+		content = content[:10000] + "\n\n...[truncated]"
 	}
 	return content, nil
 }
 
 func parseDuckDuckGo(html string) []SearchResult {
 	var results []SearchResult
-	lines := strings.Split(html, "
-")
+	lines := strings.Split(html, "\n")
 	var current ResultBuilder
 
 	for _, line := range lines {
@@ -147,22 +145,16 @@ func FormatSearchResults(results []SearchResult, query string) string {
 	if len(results) == 0 {
 		return fmt.Sprintf("🔍 По запросу '%s' ничего не найдено", query)
 	}
-	output := fmt.Sprintf("🔍 *Результаты:* `%s`
-
-", query)
+	output := fmt.Sprintf("🔍 *Результаты:* `%s`\n\n", query)
 	for i, r := range results {
-		output += fmt.Sprintf("*%d.* %s
-", i+1, r.Title)
+		output += fmt.Sprintf("*%d.* %s\n", i+1, r.Title)
 		if r.Snippet != "" {
-			output += fmt.Sprintf("_%s_
-", r.Snippet)
+			output += fmt.Sprintf("_%s_\n", r.Snippet)
 		}
 		if r.Link != "" {
-			output += fmt.Sprintf("[🔗 Ссылка](%s)
-", r.Link)
+			output += fmt.Sprintf("[🔗 Ссылка](%s)\n", r.Link)
 		}
-		output += "
-"
+		output += "\n"
 	}
 	return output
 }
