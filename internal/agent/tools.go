@@ -48,7 +48,7 @@ func (te *ToolExecutor) Execute(ctx context.Context, chatID int64, msgID int, ca
 
 func (te *ToolExecutor) thinkingNote(args map[string]interface{}) (string, error) {
 	note, _ := args["note"].(string)
-	return fmt.Sprintf("💭 %s", note), nil
+	return fmt.Sprintf("Thinking: %s", note), nil
 }
 
 func (te *ToolExecutor) terminalRun(ctx context.Context, chatID int64, msgID int, args map[string]interface{}) (string, error) {
@@ -60,7 +60,7 @@ func (te *ToolExecutor) terminalRun(ctx context.Context, chatID int64, msgID int
 	if isDangerous(cmdStr) {
 		approved, err := te.transport.ShowConfirmation(chatID, msgID, "terminal.run", args)
 		if err != nil || !approved {
-			return "❌ Отменено", nil
+			return "Cancelled by user", nil
 		}
 	}
 
@@ -70,8 +70,7 @@ func (te *ToolExecutor) terminalRun(ctx context.Context, chatID int64, msgID int
 	cmd := exec.CommandContext(ctx, "sh", "-c", cmdStr)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Sprintf("Error: %v
-%s", err, string(output)), nil
+		return fmt.Sprintf("Error: %v\n%s", err, string(output)), nil
 	}
 	return string(output), nil
 }
@@ -98,7 +97,7 @@ func (te *ToolExecutor) fileWrite(ctx context.Context, chatID int64, msgID int, 
 	if _, err := os.Stat(path); err == nil {
 		approved, err := te.transport.ShowConfirmation(chatID, msgID, "file.write", args)
 		if err != nil || !approved {
-			return "❌ Отменено", nil
+			return "Cancelled by user", nil
 		}
 	}
 
@@ -107,9 +106,9 @@ func (te *ToolExecutor) fileWrite(ctx context.Context, chatID int64, msgID int, 
 		return "", err
 	}
 
-	te.transport.SendFileBytes(chatID, filepath.Base(path), []byte(content), "📄 Файл создан")
+	te.transport.SendFileBytes(chatID, filepath.Base(path), []byte(content), "File created")
 
-	return fmt.Sprintf("✅ Записано: %s (%d bytes)", path, len(content)), nil
+	return fmt.Sprintf("Written: %s (%d bytes)", path, len(content)), nil
 }
 
 func (te *ToolExecutor) webSearch(ctx context.Context, args map[string]interface{}) (string, error) {
@@ -135,9 +134,9 @@ func (te *ToolExecutor) webFetch(ctx context.Context, args map[string]interface{
 func (te *ToolExecutor) githubBuild(ctx context.Context, chatID int64, msgID int, args map[string]interface{}) (string, error) {
 	approved, err := te.transport.ShowConfirmation(chatID, msgID, "github.build", args)
 	if err != nil || !approved {
-		return "❌ Отменено", nil
+		return "Cancelled by user", nil
 	}
-	return "🚀 GitHub Actions запущен! (stub)", nil
+	return "GitHub Actions dispatched! (stub)", nil
 }
 
 func isDangerous(cmd string) bool {
