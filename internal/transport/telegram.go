@@ -1,4 +1,3 @@
-
 package transport
 
 import (
@@ -6,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"strings"
-	"time"
 
 	"github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/oblachko/xli-bot/internal/agent"
@@ -186,7 +184,7 @@ func (t *TelegramTransport) handleCallback(query *tgbotapi.CallbackQuery) {
 }
 
 // sendMessage sends a message and returns it
-func (t *TelegramTransport) sendMessage(chatID int64, text string) (*tgbotapi.Message, error) {
+func (t *TelegramTransport) sendMessage(chatID int64, text string) (tgbotapi.Message, error) {
 	msg := tgbotapi.NewMessage(chatID, text)
 	msg.ParseMode = "HTML"
 	return t.bot.Send(msg)
