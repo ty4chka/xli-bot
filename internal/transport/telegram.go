@@ -1,3 +1,4 @@
+
 package transport
 
 import (
@@ -86,42 +87,25 @@ func (t *TelegramTransport) handleCommand(msg *tgbotapi.Message) {
 
 	switch cmd {
 	case "/start":
-		t.sendMessage(chatID, "🤖 <b>XLI Bot</b> готов к работе!
-
-Отправь мне любой запрос или используй /help")
+		t.sendMessage(chatID, "XLI Bot ready!")
 
 	case "/help":
-		help := `🤖 <b>XLI Bot Commands</b>
-
-<b>Основные:</b>
-/oa &lt;запрос&gt; — спросить агента
-/clear — очистить контекст
-/cancel — отменить генерацию
-
-<b>Сервисы:</b>
-/connect &lt;service&gt; — подключить сервис
-/skills — список скиллов
-/mcp — статус MCP-серверов
-
-<b>Система:</b>
-/help — эта справка
-/logs — получить логи`
+		help := "Commands:\n/oa <query> - ask agent\n/clear - clear context\n/help - this help"
 		t.sendMessage(chatID, help)
 
 	case "/clear":
-		// TODO: clear context
-		t.sendMessage(chatID, "🧹 Контекст очищен")
+		t.sendMessage(chatID, "Context cleared")
 
 	case "/oa":
 		if len(parts) < 2 {
-			t.sendMessage(chatID, "❌ Использование: /oa &lt;запрос&gt;")
+			t.sendMessage(chatID, "Usage: /oa <query>")
 			return
 		}
 		query := strings.Join(parts[1:], " ")
 		t.processAgentRequest(chatID, query, msg)
 
 	default:
-		t.sendMessage(chatID, "❓ Неизвестная команда. Используй /help")
+		t.sendMessage(chatID, "Unknown command. Use /help")
 	}
 }
 
@@ -130,7 +114,7 @@ func (t *TelegramTransport) processAgentRequest(chatID int64, text string, msg *
 	ctx := context.Background()
 
 	// Send "thinking" message
-	thinkingMsg, err := t.sendMessage(chatID, "⏳ Думаю...")
+	thinkingMsg, err := t.sendMessage(chatID, "Thinking...")
 	if err != nil {
 		log.Printf("Error sending thinking message: %v", err)
 		return
@@ -139,7 +123,7 @@ func (t *TelegramTransport) processAgentRequest(chatID int64, text string, msg *
 	// Run agent
 	result, err := t.agent.Run(ctx, text)
 	if err != nil {
-		t.editMessage(chatID, thinkingMsg.MessageID, fmt.Sprintf("❌ Ошибка: %s", escapeHTML(err.Error())))
+		t.editMessage(chatID, thinkingMsg.MessageID, fmt.Sprintf("Error: %s", escapeHTML(err.Error())))
 		return
 	}
 
@@ -160,9 +144,7 @@ func (t *TelegramTransport) formatResult(result *agent.AgentResult) string {
 	// Token usage
 	if result.TokenUsage.TotalTokens > 0 {
 		sb.WriteString(fmt.Sprintf(
-			"
-
-💸 <b>Токены:</b> in %d, out %d | total %d",
+			"\n\nTokens: in %d, out %d | total %d",
 			result.TokenUsage.InputTokens,
 			result.TokenUsage.OutputTokens,
 			result.TokenUsage.TotalTokens,
@@ -171,9 +153,7 @@ func (t *TelegramTransport) formatResult(result *agent.AgentResult) string {
 
 	// Agent log
 	if len(result.AgentLog) > 0 {
-		sb.WriteString("
-
-📋 <b>Лог:</b> ")
+		sb.WriteString("\n\nLog: ")
 		sb.WriteString(strings.Join(result.AgentLog, ", "))
 	}
 
@@ -199,11 +179,9 @@ func (t *TelegramTransport) handleCallback(query *tgbotapi.CallbackQuery) {
 
 	switch action {
 	case "confirm":
-		// TODO: handle confirmation
-		t.editMessage(chatID, query.Message.MessageID, "✅ Подтверждено")
+		t.editMessage(chatID, query.Message.MessageID, "Confirmed")
 	case "cancel":
-		// TODO: handle cancel
-		t.editMessage(chatID, query.Message.MessageID, "❌ Отменено")
+		t.editMessage(chatID, query.Message.MessageID, "Cancelled")
 	}
 }
 
@@ -236,14 +214,14 @@ func escapeHTML(text string) string {
 func (t *TelegramTransport) ShowConfirmation(chatID int64, messageID int, toolName string) error {
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("✅ Выполнить", fmt.Sprintf("confirm:yes:%s", toolName)),
-			tgbotapi.NewInlineKeyboardButtonData("❌ Отмена", fmt.Sprintf("confirm:no:%s", toolName)),
+			tgbotapi.NewInlineKeyboardButtonData("Execute", fmt.Sprintf("confirm:yes:%s", toolName)),
+			tgbotapi.NewInlineKeyboardButtonData("Cancel", fmt.Sprintf("confirm:no:%s", toolName)),
 		),
 	)
 
 	edit := tgbotapi.NewEditMessageTextAndMarkup(
 		chatID, messageID,
-		fmt.Sprintf("⚠️ Подтвердить действие: <code>%s</code>?", toolName),
+		fmt.Sprintf("Confirm: %s?", toolName),
 		keyboard,
 	)
 	edit.ParseMode = "HTML"
