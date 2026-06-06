@@ -24,6 +24,13 @@ type CompletionResult struct {
 	TotalTokens  int
 }
 
+// TokenUsage holds token statistics
+type TokenUsage struct {
+	InputTokens  int
+	OutputTokens int
+	TotalTokens  int
+}
+
 // Client is the interface for LLM providers
 type Client interface {
 	// Complete sends messages and returns the completion
