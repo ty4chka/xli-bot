@@ -1,4 +1,3 @@
-// internal/skills/loader.go (горячая + ленивая загрузка)
 package skills
 
 import (
@@ -8,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/fsnotify/fsnotify"
 )
@@ -32,16 +30,12 @@ func NewHotLoader() *HotLoader {
 
 func (h *HotLoader) LoadFromDir(dir string) error {
 	h.dir = dir
-
-	// Создаём папку если нет
 	os.MkdirAll(dir, 0755)
 
-	// Первичная загрузка
 	if err := h.scanDir(); err != nil {
 		return err
 	}
 
-	// Запускаем watcher для горячей перезагрузки
 	return h.startWatcher(dir)
 }
 
@@ -65,16 +59,11 @@ func (h *HotLoader) scanDir() error {
 			continue
 		}
 
-		// Проверяем изменился ли файл
-		if existing, ok := h.skills[skill.Name]; ok {
-			if existing.Modified.Equal(skill.Modified) {
-				continue // не изменился, пропускаем
-			}
+		if existing, ok := h.skills[skill.Name]; ok && existing.Modified.Equal(skill.Modified) {
+			continue
 		}
 
 		h.skills[skill.Name] = skill
-
-		// Auto-activate если trigger_mode = always
 		if skill.TriggerMode == "always" {
 			h.active[skill.Name] = true
 		}
@@ -101,7 +90,6 @@ func (h *HotLoader) parseSkill(path string) (*Skill, error) {
 		Content:  content,
 	}
 
-	// Парсим метаданные из YAML frontmatter
 	scanner := bufio.NewScanner(strings.NewReader(content))
 	inFrontmatter := false
 	var frontmatter []string
@@ -112,16 +100,14 @@ func (h *HotLoader) parseSkill(path string) (*Skill, error) {
 			if !inFrontmatter {
 				inFrontmatter = true
 				continue
-			} else {
-				break
 			}
+			break
 		}
 		if inFrontmatter {
 			frontmatter = append(frontmatter, line)
 		}
 	}
 
-	// Парсим ключ-значение
 	for _, line := range frontmatter {
 		parts := strings.SplitN(line, ":", 2)
 		if len(parts) != 2 {
@@ -142,7 +128,6 @@ func (h *HotLoader) parseSkill(path string) (*Skill, error) {
 		}
 	}
 
-	// Если имя не задано — используем имя файла
 	if skill.Name == "" {
 		skill.Name = strings.TrimSuffix(filepath.Base(path), ".md")
 	}
@@ -192,11 +177,6 @@ func (h *HotLoader) startWatcher(dir string) error {
 						h.handleFileRemove(event.Name)
 					}
 				}
-			case err, ok := <-watcher.Errors:
-				if !ok {
-					return
-				}
-				fmt.Printf("watcher error: %v\n", err)
 			case <-h.stopWatch:
 				return
 			}
@@ -254,13 +234,10 @@ func (h *HotLoader) FindMatching(query string) []Skill {
 	queryLower := strings.ToLower(query)
 
 	for _, skill := range h.skills {
-		// Always-скиллы всегда активны
 		if skill.TriggerMode == "always" {
 			matches = append(matches, *skill)
 			continue
 		}
-
-		// Auto-скиллы — проверяем keywords
 		if skill.TriggerMode == "auto" {
 			for _, kw := range skill.Keywords {
 				if strings.Contains(queryLower, strings.ToLower(kw)) {
@@ -311,16 +288,6 @@ func (h *HotLoader) GetActive() []Skill {
 	return result
 }
 
-func (h *HotLoader) Reload() error {
-	return h.scanDir()
-}
-
-func (h *HotLoader) Close() error {
-	close(h.stopWatch)
-	return h.watcher.Close()
-}
-
-// BuildPrompt строит промпт из активных скиллов
 func (h *HotLoader) BuildPrompt(query string) string {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -334,12 +301,11 @@ func (h *HotLoader) BuildPrompt(query string) string {
 		}
 	}
 
-	// Добавляем matching auto-скиллы
+	queryLower := strings.ToLower(query)
 	for _, skill := range h.skills {
 		if skill.TriggerMode != "auto" {
 			continue
 		}
-		queryLower := strings.ToLower(query)
 		for _, kw := range skill.Keywords {
 			if strings.Contains(queryLower, strings.ToLower(kw)) {
 				parts = append(parts, fmt.Sprintf("=== %s (auto-triggered) ===\n%s\n", skill.Name, skill.Content))
@@ -349,4 +315,13 @@ func (h *HotLoader) BuildPrompt(query string) string {
 	}
 
 	return strings.Join(parts, "\n")
+}
+
+func (h *HotLoader) Reload() error {
+	return h.scanDir()
+}
+
+func (h *HotLoader) Close() error {
+	close(h.stopWatch)
+	return h.watcher.Close()
 }
