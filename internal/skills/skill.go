@@ -1,9 +1,6 @@
-// internal/skills/skill.go
 package skills
 
-import (
-	"time"
-)
+import "time"
 
 type Skill struct {
 	Name        string
@@ -11,7 +8,7 @@ type Skill struct {
 	Keywords    []string
 	Content     string
 	TriggerMode string // auto, always, off
-	Source      string // путь к файлу
+	Source      string
 	Modified    time.Time
 }
 
@@ -21,5 +18,6 @@ type Registry interface {
 	Activate(name string) (*Skill, error)
 	GetAll() []Skill
 	GetActive() []Skill
-	Reload() error // горячая перезагрузка
+	BuildPrompt(query string) string
+	Reload() error
 }
