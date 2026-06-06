@@ -14,7 +14,7 @@ type ToolCall struct {
 
 func ParseToolCalls(text string) []ToolCall {
 	var calls []ToolCall
-	re := regexp.MustCompile("```tool_call\s*\n?([\s\S]*?)```")
+	re := regexp.MustCompile("```tool_call\\s*\\n?([\\s\\S]*?)```")
 	matches := re.FindAllStringSubmatch(text, -1)
 
 	for _, match := range matches {
@@ -35,6 +35,6 @@ func HasToolCalls(text string) bool {
 }
 
 func StripToolCalls(text string) string {
-	re := regexp.MustCompile("```tool_call\s*\n?[\s\S]*?```")
+	re := regexp.MustCompile("```tool_call\\s*\\n?[\\s\\S]*?```")
 	return strings.TrimSpace(re.ReplaceAllString(text, ""))
 }
