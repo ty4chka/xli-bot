@@ -1,3 +1,4 @@
+
 package agent
 
 import (
@@ -87,8 +88,7 @@ func (a *Agent) Run(ctx context.Context, chatID int64, task string) (*AgentResul
 			}
 
 			a.Memory.SaveMessage(chatID, "assistant", response.Content)
-			a.Memory.SaveMessage(chatID, "user", fmt.Sprintf("Tool <%s>:
-%s", call.Tool, output))
+			a.Memory.SaveMessage(chatID, "user", fmt.Sprintf("Tool <%s>:\n%s", call.Tool, output))
 			a.Memory.SaveToolMemory(chatID, call.Tool, output)
 
 			if call.Tool == "thinking.note" {
@@ -134,53 +134,48 @@ func (a *Agent) executeMCPTool(ctx context.Context, call ToolCall) (string, erro
 func (a *Agent) buildMessages(history []memory.Message, task, skillPrompt string) []llm.Message {
 	var messages []llm.Message
 
-	systemContent := `You are XLI-Go Bot, an AI assistant with tool calling capabilities.
+	var sb strings.Builder
+	sb.WriteString("You are XLI-Go Bot, an AI assistant with tool calling capabilities.\n\n")
+	sb.WriteString("Available built-in tools:\n")
+	sb.WriteString("```tool_call\n")
+	sb.WriteString(`{"tool":"thinking.note","args":{"note":"your thought"}}`)
+	sb.WriteString("\n```\n")
+	sb.WriteString("```tool_call\n")
+	sb.WriteString(`{"tool":"terminal.run","args":{"cmd":"command"}}`)
+	sb.WriteString("\n```\n")
+	sb.WriteString("```tool_call\n")
+	sb.WriteString(`{"tool":"file.read","args":{"path":"/path"}}`)
+	sb.WriteString("\n```\n")
+	sb.WriteString("```tool_call\n")
+	sb.WriteString(`{"tool":"file.write","args":{"path":"/path","content":"data"}}`)
+	sb.WriteString("\n```\n")
+	sb.WriteString("```tool_call\n")
+	sb.WriteString(`{"tool":"web.search","args":{"query":"search"}}`)
+	sb.WriteString("\n```\n")
+	sb.WriteString("```tool_call\n")
+	sb.WriteString(`{"tool":"web.fetch","args":{"url":"https://..."}}`)
+	sb.WriteString("\n```\n\n")
 
-Available built-in tools:
-``` + "`tool_call
-{"tool":"thinking.note","args":{"note":"your thought"}}
-" + "```" + `
-``` + "`tool_call
-{"tool":"terminal.run","args":{"cmd":"command"}}
-" + "```" + `
-``` + "`tool_call
-{"tool":"file.read","args":{"path":"/path"}}
-" + "```" + `
-``` + "`tool_call
-{"tool":"file.write","args":{"path":"/path","content":"data"}}
-" + "```" + `
-``` + "`tool_call
-{"tool":"web.search","args":{"query":"search"}}
-" + "```" + `
-``` + "`tool_call
-{"tool":"web.fetch","args":{"url":"https://..."}}
-" + "```" + `
-
-Available MCP tools:
-`
-
+	sb.WriteString("Available MCP tools:\n")
 	mcpTools := a.MCP.ListAllTools()
 	for _, tool := range mcpTools {
-		systemContent += fmt.Sprintf("- %s: %s
-", tool.Name, tool.Description)
+		sb.WriteString(fmt.Sprintf("- %s: %s\n", tool.Name, tool.Description))
 	}
 
-	systemContent += "
-Rules:
-1. Use thinking.note to plan
-2. Use web.search for current info
-3. Respond normally when no tools needed
-4. Always use tool_call format
-"
+	sb.WriteString("\nRules:\n")
+	sb.WriteString("1. Use thinking.note to plan\n")
+	sb.WriteString("2. Use web.search for current info\n")
+	sb.WriteString("3. Respond normally when no tools needed\n")
+	sb.WriteString("4. Always use tool_call format\n")
 
 	if skillPrompt != "" {
-		systemContent += "
-" + skillPrompt
+		sb.WriteString("\n")
+		sb.WriteString(skillPrompt)
 	}
 
 	messages = append(messages, llm.Message{
 		Role:    "system",
-		Content: systemContent,
+		Content: sb.String(),
 	})
 
 	for _, msg := range history {
