@@ -1,3 +1,4 @@
+// internal/mcp/registry.go (фикс строк 37-38)
 package mcp
 
 import (
@@ -35,8 +36,7 @@ func AutoDiscover(mcpDir string) ([]MCPServer, error) {
 				Enabled: true,
 				IsNPX:   false,
 			})
-			fmt.Printf("🔍 Discovered MCP: %s
-", serverName)
+			fmt.Printf("Discovered MCP: %s\n", serverName)
 		}
 	}
 
