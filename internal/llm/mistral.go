@@ -7,115 +7,103 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"time"
+	"os"
 )
 
 type MistralClient struct {
-	apiKey     string
-	baseURL    string
-	httpClient *http.Client
+	apiKey   string
+	provider string
+	model    string
+	client   *http.Client
 }
 
-func NewMistralClient(apiKey, baseURL string) *MistralClient {
-	return &MistralClient{
-		apiKey:  apiKey,
-		baseURL: baseURL,
-		httpClient: &http.Client{
-			Timeout: 180 * time.Second,
-		},
-	}
-}
-
-type openAIRequest struct {
-	Model       string    `json:"model"`
-	Messages    []message `json:"messages"`
-	Temperature float64   `json:"temperature,omitempty"`
-	MaxTokens   int       `json:"max_tokens,omitempty"`
-}
-
-type message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
-
-type openAIResponse struct {
-	ID      string `json:"id"`
-	Model   string `json:"model"`
-	Choices []struct {
-		Index   int `json:"index"`
-		Message struct {
-			Role    string `json:"role"`
-			Content string `json:"content"`
-		} `json:"message"`
-		FinishReason string `json:"finish_reason"`
-	} `json:"choices"`
-	Usage struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
-		TotalTokens      int `json:"total_tokens"`
-	} `json:"usage"`
-}
-
-func (c *MistralClient) Complete(ctx context.Context, messages []Message, opts *CompletionOpts) (*CompletionResult, error) {
-	if opts == nil {
-		opts = &CompletionOpts{
-			Temperature: 0.7,
-			MaxTokens:   1200,
-		}
-	}
-
-	model := opts.Model
+func NewMistralClient(apiKey, provider string) Client {
+	model := os.Getenv("LLM_MODEL")
 	if model == "" {
 		model = "mistral-large-latest"
 	}
 
-	msgs := make([]message, len(messages))
-	for i, m := range messages {
-		msgs[i] = message{
-			Role:    m.Role,
-			Content: m.Content,
-		}
+	return &MistralClient{
+		apiKey:   apiKey,
+		provider: provider,
+		model:    model,
+		client:   &http.Client{},
+	}
+}
+
+func (c *MistralClient) Complete(ctx context.Context, messages []Message, opts *CompletionOpts) (*CompletionResult, error) {
+	baseURL := "https://api.mistral.ai/v1"
+	if c.provider == "groq" {
+		baseURL = "https://api.groq.com/openai/v1"
+	} else if c.provider == "openrouter" {
+		baseURL = "https://openrouter.ai/api/v1"
 	}
 
-	reqBody := openAIRequest{
-		Model:       model,
-		Messages:    msgs,
-		Temperature: opts.Temperature,
-		MaxTokens:   opts.MaxTokens,
+	model := c.model
+	if opts != nil && opts.Model != "" {
+		model = opts.Model
+	}
+
+	temp := 0.7
+	if opts != nil && opts.Temperature != 0 {
+		temp = opts.Temperature
+	}
+
+	maxTokens := 4000
+	if opts != nil && opts.MaxTokens != 0 {
+		maxTokens = opts.MaxTokens
+	}
+
+	reqBody := map[string]interface{}{
+		"model":       model,
+		"messages":    convertMessages(messages),
+		"temperature": temp,
+		"max_tokens":  maxTokens,
 	}
 
 	jsonBody, err := json.Marshal(reqBody)
 	if err != nil {
-		return nil, fmt.Errorf("marshal request: %w", err)
+		return nil, err
 	}
 
-	url := c.baseURL + "/chat/completions"
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonBody))
+	req, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/chat/completions", bytes.NewReader(jsonBody))
 	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
+		return nil, err
 	}
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("do request: %w", err)
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
+		return nil, err
 	}
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
 	}
 
-	var result openAIResponse
+	var result struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			TotalTokens      int `json:"total_tokens"`
+		} `json:"usage"`
+	}
+
 	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("unmarshal response: %w", err)
+		return nil, err
 	}
 
 	if len(result.Choices) == 0 {
@@ -130,18 +118,13 @@ func (c *MistralClient) Complete(ctx context.Context, messages []Message, opts *
 	}, nil
 }
 
-func (c *MistralClient) Stream(ctx context.Context, messages []Message, opts *CompletionOpts) (<-chan string, error) {
-	result, err := c.Complete(ctx, messages, opts)
-	if err != nil {
-		return nil, err
+func convertMessages(msgs []Message) []map[string]string {
+	var result []map[string]string
+	for _, m := range msgs {
+		result = append(result, map[string]string{
+			"role":    m.Role,
+			"content": m.Content,
+		})
 	}
-
-	ch := make(chan string, 1)
-	ch <- result.Content
-	close(ch)
-	return ch, nil
-}
-
-func Factory(provider, apiKey, baseURL string) Client {
-	return NewMistralClient(apiKey, baseURL)
+	return result
 }
