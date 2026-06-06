@@ -4,225 +4,285 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
 
-	"github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+
 	"github.com/oblachko/xli-bot/internal/agent"
-	"github.com/oblachko/xli-bot/internal/config"
+	"github.com/oblachko/xli-bot/internal/utils"
 )
 
-// TelegramTransport handles Telegram bot interactions
 type TelegramTransport struct {
-	bot    *tgbotapi.BotAPI
-	agent  *agent.Agent
-	config *config.Config
+	bot           *tgbotapi.BotAPI
+	agent         *agent.Agent
+	confirmations map[string]chan bool
+	mu            sync.RWMutex
 }
 
-// NewTelegramTransport creates a new Telegram transport
-func NewTelegramTransport(cfg *config.Config, ag *agent.Agent) (*TelegramTransport, error) {
-	bot, err := tgbotapi.NewBotAPI(cfg.TelegramToken)
+func NewTelegram(token string, a *agent.Agent) (*TelegramTransport, error) {
+	bot, err := tgbotapi.NewBotAPI(token)
 	if err != nil {
-		return nil, fmt.Errorf("create bot: %w", err)
+		return nil, err
 	}
 
-	bot.Debug = false
-	log.Printf("Authorized on account %s", bot.Self.UserName)
-
 	return &TelegramTransport{
-		bot:    bot,
-		agent:  ag,
-		config: cfg,
+		bot:           bot,
+		agent:         a,
+		confirmations: make(map[string]chan bool),
 	}, nil
 }
 
-// Start begins polling for updates
-func (t *TelegramTransport) Start() error {
+func (t *TelegramTransport) SetAgent(a *agent.Agent) {
+	t.agent = a
+}
+
+func (t *TelegramTransport) Start() {
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
 
 	updates := t.bot.GetUpdatesChan(u)
+	log.Printf("Bot @%s started", t.bot.Self.UserName)
 
 	for update := range updates {
 		if update.Message != nil {
 			go t.handleMessage(update.Message)
-		} else if update.CallbackQuery != nil {
+		}
+		if update.CallbackQuery != nil {
 			go t.handleCallback(update.CallbackQuery)
 		}
 	}
-
-	return nil
 }
 
-// handleMessage processes incoming messages
 func (t *TelegramTransport) handleMessage(msg *tgbotapi.Message) {
 	chatID := msg.Chat.ID
-	text := msg.Text
 
-	// Ignore empty messages
-	if text == "" {
-		return
-	}
-
-	// Handle commands
-	if strings.HasPrefix(text, "/") {
+	if msg.IsCommand() {
 		t.handleCommand(msg)
 		return
 	}
 
-	// Regular message — process through agent
-	t.processAgentRequest(chatID, text, msg)
+	t.processAgentRequest(chatID, msg.Text)
 }
 
-// handleCommand processes bot commands
 func (t *TelegramTransport) handleCommand(msg *tgbotapi.Message) {
 	chatID := msg.Chat.ID
-	parts := strings.Fields(msg.Text)
-	if len(parts) == 0 {
-		return
-	}
 
-	cmd := parts[0]
+	switch msg.Command() {
+	case "start":
+		t.sendMessage(chatID, "🤖 *XLI Bot* запущен!\n\nИспользуй `/oa <запрос>` или просто пиши.")
 
-	switch cmd {
-	case "/start":
-		t.sendMessage(chatID, "XLI Bot ready!")
-
-	case "/help":
-		help := "Commands:\n/oa <query> - ask agent\n/clear - clear context\n/help - this help"
+	case "help":
+		help := "📋 *Команды:*\n" +
+			"`/oa <запрос>` — спросить агента\n" +
+			"`/clear` — очистить память\n" +
+			"`/skills` — список скиллов\n" +
+			"`/mcp` — статус MCP\n" +
+			"`/status` — статус бота\n\n" +
+			"Просто пиши текст — я отвечу."
 		t.sendMessage(chatID, help)
 
-	case "/clear":
-		t.sendMessage(chatID, "Context cleared")
+	case "clear":
+		t.agent.Memory.ClearHistory(chatID)
+		t.sendMessage(chatID, "🧹 *Память очищена!*")
 
-	case "/oa":
-		if len(parts) < 2 {
-			t.sendMessage(chatID, "Usage: /oa <query>")
+	case "status":
+		t.sendMessage(chatID, "✅ *Бот работает*\n💾 SQLite подключена")
+
+	case "skills":
+		t.handleSkillsCommand(chatID)
+
+	case "mcp":
+		t.handleMCPCommand(chatID)
+
+	case "oa":
+		query := msg.CommandArguments()
+		if query == "" {
+			t.sendMessage(chatID, "❌ Укажи запрос: `/oa напиши код на Go`")
 			return
 		}
-		query := strings.Join(parts[1:], " ")
-		t.processAgentRequest(chatID, query, msg)
+		t.processAgentRequest(chatID, query)
 
 	default:
-		t.sendMessage(chatID, "Unknown command. Use /help")
+		t.sendMessage(chatID, "❓ Неизвестная команда. `/help`")
 	}
 }
 
-// processAgentRequest runs the agent and handles the response
-func (t *TelegramTransport) processAgentRequest(chatID int64, text string, msg *tgbotapi.Message) {
-	ctx := context.Background()
-
-	// Send "thinking" message
-	thinkingMsg, err := t.sendMessage(chatID, "Thinking...")
-	if err != nil {
-		log.Printf("Error sending thinking message: %v", err)
-		return
+func (t *TelegramTransport) handleSkillsCommand(chatID int64) {
+	all := t.agent.Skills.GetAll()
+	active := t.agent.Skills.GetActive()
+	activeMap := make(map[string]bool)
+	for _, a := range active {
+		activeMap[a.Name] = true
 	}
 
-	// Run agent
-	result, err := t.agent.Run(ctx, text)
-	if err != nil {
-		t.editMessage(chatID, thinkingMsg.MessageID, fmt.Sprintf("Error: %s", escapeHTML(err.Error())))
-		return
-	}
-
-	// Build final response
-	response := t.formatResult(result)
-
-	// Edit thinking message with final result
-	t.editMessage(chatID, thinkingMsg.MessageID, response)
-}
-
-// formatResult formats the agent result for Telegram
-func (t *TelegramTransport) formatResult(result *agent.AgentResult) string {
 	var sb strings.Builder
-
-	// Answer
-	sb.WriteString(result.Answer)
-
-	// Token usage
-	if result.TokenUsage.TotalTokens > 0 {
-		sb.WriteString(fmt.Sprintf(
-			"\n\nTokens: in %d, out %d | total %d",
-			result.TokenUsage.InputTokens,
-			result.TokenUsage.OutputTokens,
-			result.TokenUsage.TotalTokens,
-		))
+	sb.WriteString("📚 *Скиллы:*\n\n")
+	for _, s := range all {
+		status := "⚪"
+		if activeMap[s.Name] {
+			status = "🟢"
+		}
+		if s.TriggerMode == "always" {
+			status = "🔒"
+		}
+		sb.WriteString(fmt.Sprintf("%s `%s` (%s)\n", status, s.Name, s.TriggerMode))
 	}
-
-	// Agent log
-	if len(result.AgentLog) > 0 {
-		sb.WriteString("\n\nLog: ")
-		sb.WriteString(strings.Join(result.AgentLog, ", "))
-	}
-
-	return sb.String()
+	t.sendMessage(chatID, sb.String())
 }
 
-// handleCallback processes inline keyboard callbacks
-func (t *TelegramTransport) handleCallback(query *tgbotapi.CallbackQuery) {
-	// Acknowledge the callback
-	callback := tgbotapi.NewCallback(query.ID, "")
-	t.bot.Request(callback)
+func (t *TelegramTransport) handleMCPCommand(chatID int64) {
+	tools := t.agent.MCP.ListAllTools()
+	var sb strings.Builder
+	sb.WriteString("📦 *MCP тулы:*\n\n")
+	if len(tools) == 0 {
+		sb.WriteString("_Нет подключенных серверов_")
+	} else {
+		for _, tool := range tools {
+			sb.WriteString(fmt.Sprintf("• `%s` — %s\n", tool.Name, tool.Description))
+		}
+	}
+	t.sendMessage(chatID, sb.String())
+}
 
-	data := query.Data
-	chatID := query.Message.Chat.ID
+func (t *TelegramTransport) processAgentRequest(chatID int64, text string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
 
-	// Parse callback data
-	parts := strings.Split(data, ":")
-	if len(parts) < 2 {
+	// "Думаю..."
+	thinkMsg, _ := t.sendMessage(chatID, "⏳ *Думаю...*")
+
+	result, err := t.agent.Run(ctx, chatID, text)
+	if err != nil {
+		t.editMessage(chatID, thinkMsg.MessageID, "❌ *Ошибка:* "+utils.EscapeMarkdownV2(err.Error()))
 		return
 	}
 
-	action := parts[0]
+	response := utils.FormatResponse(result.Answer)
+	tokenInfo := utils.FormatTokenUsage(result.InputTokens, result.OutputTokens, result.TotalTokens)
+	finalText := response + "\n\n" + tokenInfo
 
-	switch action {
-	case "confirm":
-		t.editMessage(chatID, query.Message.MessageID, "Confirmed")
-	case "cancel":
-		t.editMessage(chatID, query.Message.MessageID, "Cancelled")
-	}
-}
-
-// sendMessage sends a message and returns it
-func (t *TelegramTransport) sendMessage(chatID int64, text string) (tgbotapi.Message, error) {
-	msg := tgbotapi.NewMessage(chatID, text)
-	msg.ParseMode = "HTML"
-	return t.bot.Send(msg)
-}
-
-// editMessage edits an existing message
-func (t *TelegramTransport) editMessage(chatID int64, messageID int, text string) {
-	edit := tgbotapi.NewEditMessageText(chatID, messageID, text)
-	edit.ParseMode = "HTML"
-	_, err := t.bot.Send(edit)
-	if err != nil {
-		log.Printf("Error editing message: %v", err)
-	}
-}
-
-// escapeHTML escapes HTML special characters
-func escapeHTML(text string) string {
-	text = strings.ReplaceAll(text, "&", "&amp;")
-	text = strings.ReplaceAll(text, "<", "&lt;")
-	text = strings.ReplaceAll(text, ">", "&gt;")
-	return text
-}
-
-// ShowConfirmation shows inline keyboard for confirmation
-func (t *TelegramTransport) ShowConfirmation(chatID int64, messageID int, toolName string) error {
+	// Inline кнопки
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("Execute", fmt.Sprintf("confirm:yes:%s", toolName)),
-			tgbotapi.NewInlineKeyboardButtonData("Cancel", fmt.Sprintf("confirm:no:%s", toolName)),
+			tgbotapi.NewInlineKeyboardButtonData("🧹 Очистить", fmt.Sprintf("action:clear:%d", chatID)),
+			tgbotapi.NewInlineKeyboardButtonData("🔃 Ещё раз", fmt.Sprintf("action:regen:%d:%s", chatID, utils.EscapeMarkdownV2(text))),
 		),
 	)
 
-	edit := tgbotapi.NewEditMessageTextAndMarkup(
-		chatID, messageID,
-		fmt.Sprintf("Confirm: %s?", toolName),
-		keyboard,
+	t.editMessageWithKeyboard(chatID, thinkMsg.MessageID, finalText, keyboard)
+}
+
+func (t *TelegramTransport) handleCallback(query *tgbotapi.CallbackQuery) {
+	chatID := query.Message.Chat.ID
+	msgID := query.Message.MessageID
+	data := query.Data
+
+	parts := strings.Split(data, ":")
+	if len(parts) < 2 {
+		t.bot.Request(tgbotapi.NewCallback(query.ID, ""))
+		return
+	}
+
+	switch parts[0] {
+	case "confirm":
+		if len(parts) >= 3 {
+			token := parts[2]
+			approved := parts[1] == "yes"
+			t.mu.RLock()
+			ch, ok := t.confirmations[token]
+			t.mu.RUnlock()
+			if ok {
+				ch <- approved
+			}
+			t.editMessage(chatID, msgID, query.Message.Text)
+		}
+
+	case "action":
+		switch parts[1] {
+		case "clear":
+			t.agent.Memory.ClearHistory(chatID)
+			t.editMessage(chatID, msgID, "🧹 *Память очищена!*")
+		case "regen":
+			if len(parts) >= 3 {
+				originalText := strings.Join(parts[2:], ":")
+				t.bot.Request(tgbotapi.NewDeleteMessage(chatID, msgID))
+				t.processAgentRequest(chatID, originalText)
+			}
+		}
+	}
+
+	t.bot.Request(tgbotapi.NewCallback(query.ID, ""))
+}
+
+func (t *TelegramTransport) ShowConfirmation(chatID int64, msgID int, toolName string, args map[string]interface{}) (bool, error) {
+	token := fmt.Sprintf("confirm_%d_%d", chatID, time.Now().UnixNano())
+
+	t.mu.Lock()
+	t.confirmations[token] = make(chan bool, 1)
+	t.mu.Unlock()
+
+	argsStr := formatArgs(args)
+	text := fmt.Sprintf("⚠️ *Подтверди действие:*\n\n*Тул:* `%s`\n*Аргументы:*\n%s\n\nВыполнить?", toolName, argsStr)
+
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("✅ Выполнить", fmt.Sprintf("confirm:yes:%s", token)),
+			tgbotapi.NewInlineKeyboardButtonData("❌ Отмена", fmt.Sprintf("confirm:no:%s", token)),
+		),
 	)
-	edit.ParseMode = "HTML"
-	_, err := t.bot.Send(edit)
+
+	t.editMessageWithKeyboard(chatID, msgID, text, keyboard)
+
+	select {
+	case approved := <-t.confirmations[token]:
+		t.mu.Lock()
+		delete(t.confirmations, token)
+		t.mu.Unlock()
+		return approved, nil
+	case <-time.After(60 * time.Second):
+		t.mu.Lock()
+		delete(t.confirmations, token)
+		t.mu.Unlock()
+		return false, fmt.Errorf("timeout")
+	}
+}
+
+func formatArgs(args map[string]interface{}) string {
+	var parts []string
+	for k, v := range args {
+		parts = append(parts, fmt.Sprintf("  • `%s`: `%v`", k, v))
+	}
+	return strings.Join(parts, "\n")
+}
+
+func (t *TelegramTransport) SendFileBytes(chatID int64, name string, data []byte, caption string) error {
+	file := tgbotapi.NewDocument(chatID, tgbotapi.FileBytes{Name: name, Bytes: data})
+	if caption != "" {
+		file.Caption = caption
+		file.ParseMode = tgbotapi.ModeMarkdownV2
+	}
+	_, err := t.bot.Send(file)
 	return err
+}
+
+func (t *TelegramTransport) sendMessage(chatID int64, text string) (tgbotapi.Message, error) {
+	msg := tgbotapi.NewMessage(chatID, text)
+	msg.ParseMode = tgbotapi.ModeMarkdownV2
+	return t.bot.Send(msg)
+}
+
+func (t *TelegramTransport) editMessage(chatID int64, msgID int, text string) {
+	edit := tgbotapi.NewEditMessageText(chatID, msgID, text)
+	edit.ParseMode = tgbotapi.ModeMarkdownV2
+	t.bot.Request(edit)
+}
+
+func (t *TelegramTransport) editMessageWithKeyboard(chatID int64, msgID int, text string, keyboard tgbotapi.InlineKeyboardMarkup) {
+	edit := tgbotapi.NewEditMessageText(chatID, msgID, text)
+	edit.ParseMode = tgbotapi.ModeMarkdownV2
+	edit.ReplyMarkup = &keyboard
+	t.bot.Request(edit)
 }
