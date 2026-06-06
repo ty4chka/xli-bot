@@ -1,4 +1,3 @@
-// internal/mcp/client.go (ленивый MCP клиент)
 package mcp
 
 import (
@@ -7,15 +6,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"sync"
 	"time"
 )
 
-// Client управляет MCP серверами
 type Client struct {
-	servers   map[string]*ServerConn
-	mu        sync.RWMutex
+	servers map[string]*ServerConn
+	mu      sync.RWMutex
 }
 
 type ServerConn struct {
@@ -38,7 +37,6 @@ type Tool struct {
 	Name        string
 	Description string
 	Server      string
-	InputSchema map[string]interface{}
 }
 
 type MCPServer struct {
@@ -69,15 +67,12 @@ func (c *Client) Register(server MCPServer) error {
 	c.servers[server.Name] = conn
 	c.mu.Unlock()
 
-	// Ленивое подключение — не коннектимся сразу
 	if server.Enabled {
-		fmt.Printf("📦 MCP server registered (lazy): %s\n", server.Name)
+		fmt.Printf("📦 MCP registered (lazy): %s\n", server.Name)
 	}
-
 	return nil
 }
 
-// Connect лениво подключается к серверу
 func (c *Client) Connect(serverName string) error {
 	c.mu.RLock()
 	conn, ok := c.servers[serverName]
@@ -95,7 +90,6 @@ func (c *Client) Connect(serverName string) error {
 		return nil
 	}
 
-	// Запускаем процесс
 	var cmd *exec.Cmd
 	if conn.IsNPX {
 		cmd = exec.Command("npx", conn.Command...)
@@ -125,14 +119,12 @@ func (c *Client) Connect(serverName string) error {
 	conn.connected = true
 	conn.lastUsed = time.Now()
 
-	// Инициализация JSON-RPC
 	if err := c.initialize(conn); err != nil {
 		conn.process.Kill()
 		conn.connected = false
 		return err
 	}
 
-	// Получаем список тулов
 	tools, err := c.listTools(conn)
 	if err != nil {
 		return err
@@ -157,7 +149,6 @@ func (c *Client) initialize(conn *ServerConn) error {
 			},
 		},
 	}
-
 	return c.sendRequest(conn, req)
 }
 
@@ -172,7 +163,6 @@ func (c *Client) listTools(conn *ServerConn) ([]Tool, error) {
 		return nil, err
 	}
 
-	// Читаем ответ
 	resp, err := c.readResponse(conn)
 	if err != nil {
 		return nil, err
@@ -188,9 +178,6 @@ func (c *Client) listTools(conn *ServerConn) ([]Tool, error) {
 						Description: getString(toolMap, "description"),
 						Server:      conn.Name,
 					}
-					if schema, ok := toolMap["inputSchema"].(map[string]interface{}); ok {
-						tool.InputSchema = schema
-					}
 					tools = append(tools, tool)
 				}
 			}
@@ -201,7 +188,6 @@ func (c *Client) listTools(conn *ServerConn) ([]Tool, error) {
 }
 
 func (c *Client) CallTool(ctx context.Context, serverName, toolName string, args map[string]interface{}) (string, error) {
-	// Ленивое подключение
 	if err := c.Connect(serverName); err != nil {
 		return "", err
 	}
@@ -234,10 +220,8 @@ func (c *Client) CallTool(ctx context.Context, serverName, toolName string, args
 
 	resp, err := c.readResponse(conn)
 	if err != nil {
-		// Пробуем переподключиться
 		conn.connected = false
 		if reconnectErr := c.Connect(serverName); reconnectErr == nil {
-			// Повторяем запрос
 			c.mu.RLock()
 			conn, _ = c.servers[serverName]
 			c.mu.RUnlock()
@@ -316,7 +300,6 @@ func (c *Client) Disconnect(serverName string) error {
 		conn.process.Wait()
 		conn.connected = false
 	}
-
 	return nil
 }
 
@@ -344,7 +327,6 @@ func (c *Client) Toggle(serverName string) (bool, error) {
 	return conn.Enabled, nil
 }
 
-// CleanupIdle отключает неиспользуемые серверы
 func (c *Client) CleanupIdle() {
 	c.mu.RLock()
 	servers := make([]*ServerConn, 0, len(c.servers))
@@ -356,7 +338,7 @@ func (c *Client) CleanupIdle() {
 	for _, conn := range servers {
 		conn.mu.Lock()
 		if conn.connected && time.Since(conn.lastUsed) > conn.idleTimeout {
-			fmt.Printf("💤 Disconnecting idle MCP server: %s\n", conn.Name)
+			fmt.Printf("💤 Disconnecting idle MCP: %s\n", conn.Name)
 			if conn.process != nil {
 				conn.process.Process.Kill()
 				conn.process.Wait()
@@ -367,7 +349,6 @@ func (c *Client) CleanupIdle() {
 	}
 }
 
-// AutoReconnect пытается переподключить упавшие серверы
 func (c *Client) AutoReconnect() {
 	c.mu.RLock()
 	names := make([]string, 0, len(c.servers))
@@ -380,7 +361,7 @@ func (c *Client) AutoReconnect() {
 
 	for _, name := range names {
 		if err := c.Connect(name); err != nil {
-			fmt.Printf("❌ Auto-reconnect failed for %s: %v\n", name, err)
+			fmt.Printf("❌ Auto-reconnect failed %s: %v\n", name, err)
 		}
 	}
 }
@@ -390,7 +371,6 @@ func (c *Client) sendRequest(conn *ServerConn, req map[string]interface{}) error
 	if err != nil {
 		return err
 	}
-
 	_, err = fmt.Fprintf(conn.stdin, "%s\n", string(data))
 	return err
 }
@@ -405,7 +385,6 @@ func (c *Client) readResponse(conn *ServerConn) (map[string]interface{}, error) 
 	if err := json.Unmarshal([]byte(line), &resp); err != nil {
 		return nil, err
 	}
-
 	return resp, nil
 }
 
