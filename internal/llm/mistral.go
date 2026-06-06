@@ -10,14 +10,12 @@ import (
 	"time"
 )
 
-// MistralClient implements the Client interface for Mistral AI
 type MistralClient struct {
-	apiKey string
-	baseURL string
+	apiKey     string
+	baseURL    string
 	httpClient *http.Client
 }
 
-// NewMistralClient creates a new Mistral client
 func NewMistralClient(apiKey, baseURL string) *MistralClient {
 	return &MistralClient{
 		apiKey:  apiKey,
@@ -28,8 +26,7 @@ func NewMistralClient(apiKey, baseURL string) *MistralClient {
 	}
 }
 
-// mistralRequest represents the API request body
-type mistralRequest struct {
+type openAIRequest struct {
 	Model       string    `json:"model"`
 	Messages    []message `json:"messages"`
 	Temperature float64   `json:"temperature,omitempty"`
@@ -41,11 +38,8 @@ type message struct {
 	Content string `json:"content"`
 }
 
-// mistralResponse represents the API response
-type mistralResponse struct {
+type openAIResponse struct {
 	ID      string `json:"id"`
-	Object  string `json:"object"`
-	Created int64  `json:"created"`
 	Model   string `json:"model"`
 	Choices []struct {
 		Index   int `json:"index"`
@@ -62,7 +56,6 @@ type mistralResponse struct {
 	} `json:"usage"`
 }
 
-// Complete implements the Client interface
 func (c *MistralClient) Complete(ctx context.Context, messages []Message, opts *CompletionOpts) (*CompletionResult, error) {
 	if opts == nil {
 		opts = &CompletionOpts{
@@ -76,7 +69,6 @@ func (c *MistralClient) Complete(ctx context.Context, messages []Message, opts *
 		model = "mistral-large-latest"
 	}
 
-	// Convert messages
 	msgs := make([]message, len(messages))
 	for i, m := range messages {
 		msgs[i] = message{
@@ -85,7 +77,7 @@ func (c *MistralClient) Complete(ctx context.Context, messages []Message, opts *
 		}
 	}
 
-	reqBody := mistralRequest{
+	reqBody := openAIRequest{
 		Model:       model,
 		Messages:    msgs,
 		Temperature: opts.Temperature,
@@ -97,7 +89,8 @@ func (c *MistralClient) Complete(ctx context.Context, messages []Message, opts *
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/chat/completions", bytes.NewBuffer(jsonBody))
+	url := c.baseURL + "/chat/completions"
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonBody))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
@@ -120,7 +113,7 @@ func (c *MistralClient) Complete(ctx context.Context, messages []Message, opts *
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
-	var result mistralResponse
+	var result openAIResponse
 	if err := json.Unmarshal(body, &result); err != nil {
 		return nil, fmt.Errorf("unmarshal response: %w", err)
 	}
@@ -137,10 +130,7 @@ func (c *MistralClient) Complete(ctx context.Context, messages []Message, opts *
 	}, nil
 }
 
-// Stream implements the Client interface (simplified — returns full response)
 func (c *MistralClient) Stream(ctx context.Context, messages []Message, opts *CompletionOpts) (<-chan string, error) {
-	// For now, just use Complete and return the full response
-	// TODO: implement SSE streaming
 	result, err := c.Complete(ctx, messages, opts)
 	if err != nil {
 		return nil, err
@@ -152,17 +142,6 @@ func (c *MistralClient) Stream(ctx context.Context, messages []Message, opts *Co
 	return ch, nil
 }
 
-// Factory creates the appropriate LLM client based on provider
 func Factory(provider, apiKey, baseURL string) Client {
-	switch provider {
-	case "mistral":
-		return NewMistralClient(apiKey, baseURL)
-	case "groq":
-		// Groq uses OpenAI-compatible API
-		return NewMistralClient(apiKey, baseURL) // Same format
-	case "openrouter":
-		return NewMistralClient(apiKey, baseURL) // Same format
-	default:
-		return NewMistralClient(apiKey, baseURL)
-	}
+	return NewMistralClient(apiKey, baseURL)
 }
