@@ -2,16 +2,19 @@ package llm
 
 import "context"
 
+type Client interface {
+	Complete(ctx context.Context, messages []Message, opts *CompletionOpts) (*CompletionResult, error)
+}
+
 type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role    string
+	Content string
 }
 
 type CompletionOpts struct {
-	Model           string
-	Temperature     float64
-	MaxTokens       int
-	ReasoningEffort string
+	Model       string
+	Temperature float64
+	MaxTokens   int
 }
 
 type CompletionResult struct {
@@ -19,15 +22,4 @@ type CompletionResult struct {
 	InputTokens  int
 	OutputTokens int
 	TotalTokens  int
-}
-
-type TokenUsage struct {
-	InputTokens  int
-	OutputTokens int
-	TotalTokens  int
-}
-
-type Client interface {
-	Complete(ctx context.Context, messages []Message, opts *CompletionOpts) (*CompletionResult, error)
-	Stream(ctx context.Context, messages []Message, opts *CompletionOpts) (<-chan string, error)
 }
