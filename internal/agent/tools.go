@@ -1,11 +1,11 @@
 package agent
 
 import (
-	"path/filepath"
 	"context"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -107,7 +107,6 @@ func (te *ToolExecutor) fileWrite(ctx context.Context, chatID int64, msgID int, 
 		return "", err
 	}
 
-	// Отправляем файл в чат
 	te.transport.SendFileBytes(chatID, filepath.Base(path), []byte(content), "📄 Файл создан")
 
 	return fmt.Sprintf("✅ Записано: %s (%d bytes)", path, len(content)), nil
