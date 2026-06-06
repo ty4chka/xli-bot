@@ -120,7 +120,7 @@ func (c *Client) Connect(serverName string) error {
 	conn.lastUsed = time.Now()
 
 	if err := c.initialize(conn); err != nil {
-		conn.process.Kill()
+		conn.process.Process.Kill()
 		conn.connected = false
 		return err
 	}
@@ -297,7 +297,7 @@ func (c *Client) Disconnect(serverName string) error {
 
 	if conn.connected && conn.process != nil {
 		conn.process.Process.Kill()
-		conn.process.Wait()
+		conn.process.Process.Wait()
 		conn.connected = false
 	}
 	return nil
@@ -318,7 +318,7 @@ func (c *Client) Toggle(serverName string) (bool, error) {
 		conn.mu.Lock()
 		if conn.process != nil {
 			conn.process.Process.Kill()
-			conn.process.Wait()
+			conn.process.Process.Wait()
 			conn.connected = false
 		}
 		conn.mu.Unlock()
@@ -341,7 +341,7 @@ func (c *Client) CleanupIdle() {
 			fmt.Printf("💤 Disconnecting idle MCP: %s\n", conn.Name)
 			if conn.process != nil {
 				conn.process.Process.Kill()
-				conn.process.Wait()
+				conn.process.Process.Wait()
 			}
 			conn.connected = false
 		}
