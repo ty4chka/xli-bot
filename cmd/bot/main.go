@@ -1,4 +1,3 @@
-// cmd/bot/main.go (финальная версия)
 package main
 
 import (
@@ -32,19 +31,17 @@ func main() {
 	}
 	defer store.Close()
 
-	// Скиллы (горячая загрузка)
+	// Skills (hot reload)
 	skillRegistry := skills.NewHotLoader()
 	if err := skillRegistry.LoadFromDir("skills"); err != nil {
-		log.Printf("Skills load warning: %v", err)
+		log.Printf("Skills warning: %v", err)
 	}
 
-	// MCP клиент (ленивый)
+	// MCP (lazy)
 	mcpClient := mcp.NewClient()
-
-	// Авто-обнаружение MCP серверов
 	mcpServers, err := mcp.AutoDiscover("mcp_servers")
 	if err != nil {
-		log.Printf("MCP discover warning: %v", err)
+		log.Printf("MCP warning: %v", err)
 	}
 	for _, server := range mcpServers {
 		mcpClient.Register(server)
@@ -53,20 +50,18 @@ func main() {
 	// LLM
 	llmClient := llm.NewMistralClient(cfg.LLM.APIKey, cfg.LLM.Provider)
 
-	// Telegram transport
+	// Telegram
 	tg, err := transport.NewTelegram(cfg.Telegram.BotToken, nil)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	// Tool executor
+	// Agent
 	executor := agent.NewToolExecutor(tg)
-
-	// Agent со всеми модулями
 	botAgent := agent.NewAgent(llmClient, store, executor, skillRegistry, mcpClient)
 	tg.SetAgent(botAgent)
 
-	// Фоновые задачи
+	// Background: cleanup + reconnect
 	go func() {
 		ticker := time.NewTicker(5 * time.Minute)
 		defer ticker.Stop()
@@ -76,8 +71,8 @@ func main() {
 		}
 	}()
 
-	log.Println("🤖 XLI Bot started with MCP + Hot Skills!")
-	log.Printf("📦 MCP servers: %d discovered", len(mcpServers))
+	log.Println("🤖 XLI Bot v2 started!")
+	log.Printf("📦 MCP servers: %d", len(mcpServers))
 	log.Printf("📚 Skills: hot-reload enabled")
 
 	tg.Start()
