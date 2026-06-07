@@ -182,10 +182,11 @@ func (t *TelegramTransport) processAgentRequest(chatID int64, text string) {
 
 	finalText := response + "\n\n" + tokenInfo
 
+	// FIX: Убрали chatID из callback data для Regen — берём из query.Message.Chat.ID
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("Clear", fmt.Sprintf("action:clear:%d", chatID)),
-			tgbotapi.NewInlineKeyboardButtonData("Regen", fmt.Sprintf("action:regen:%d:%s", chatID, text)),
+			tgbotapi.NewInlineKeyboardButtonData("Regen", fmt.Sprintf("action:regen:%s", text)),
 		),
 	)
 
@@ -225,6 +226,7 @@ func (t *TelegramTransport) handleCallback(query *tgbotapi.CallbackQuery) {
 			t.agent.Memory.ClearHistory(chatID)
 			t.editHTML(chatID, msgID, "<b>Memory cleared!</b>")
 		case "regen":
+			// FIX: chatID берём из query.Message.Chat.ID, текст из parts[2:]
 			if len(parts) >= 3 {
 				originalText := strings.Join(parts[2:], ":")
 				t.bot.Request(tgbotapi.NewDeleteMessage(chatID, msgID))
@@ -284,6 +286,9 @@ func (t *TelegramTransport) SendFileBytes(chatID int64, name string, data []byte
 		file.ParseMode = tgbotapi.ModeHTML
 	}
 	_, err := t.bot.Send(file)
+	if err != nil {
+		log.Printf("[ERROR] SendFileBytes failed: %v", err)
+	}
 	return err
 }
 
