@@ -26,16 +26,16 @@ const (
 
 // SubAgent — агент под конкретную задачу
 type SubAgent struct {
-	Type        AgentType
-	Name        string
+	Type         AgentType
+	Name         string
 	SystemPrompt string
-	Skills      []skills.Skill
-	Tools       []string // разрешённые тулзы
-	MaxSteps    int
-	LLM         llm.Client
-	Memory      memory.Store
-	Executor    *ToolExecutor
-	MCP         *mcp.Client
+	Skills       []skills.Skill
+	Tools        []string // разрешённые тулзы
+	MaxSteps     int
+	LLM          llm.Client
+	Memory       memory.Store
+	Executor     *ToolExecutor
+	MCP          *mcp.Client
 }
 
 // Orchestrator — выбирает агента под задачу
@@ -91,7 +91,6 @@ COMPLEXITY: <1-10>`, query)
 		MaxTokens:   500,
 	})
 	if err != nil {
-		// Fallback на general
 		return &TaskAnalysis{
 			AgentType:  AgentGeneral,
 			Confidence: 50,
@@ -153,15 +152,30 @@ func (o *Orchestrator) CreateSubAgent(analysis *TaskAnalysis, skillRegistry skil
 		}
 	}
 
-	// Определяем разрешённые тулзы
-	allowedTools := []string{"thinking.note", "terminal.run", "file.read", "file.write", "web.search", "web.fetch"}
+	// Определяем разрешённые тулзы (built-in + MCP)
+	allowedTools := []string{
+		"thinking.note", "terminal.run", "file.read", "file.write",
+		"web.search", "web.fetch", "github.build", "sandbox.run",
+		// MCP tools — ленивые, пробуем все
+		"search_code", "analyze_traceback", "run_tests", "fix_test",
+		"suggest_command", "fix_typo", "generate_complex_command",
+		"list_dependencies", "check_vulnerabilities", "update_dependencies",
+		"prompt_create", "prompt_get", "prompt_list", "prompt_evaluate",
+		"blame_line", "code_ownership", "commit_history", "temporal_coupling",
+		"analyze_complexity", "detect_long_methods",
+		"dependency_graph", "circular_dependencies", "suggest_modules",
+		"discover_tests",
+	}
+
 	switch analysis.AgentType {
 	case AgentCoder:
-		allowedTools = append(allowedTools, "github.build")
+		allowedTools = append(allowedTools, "github.build", "sandbox.run")
 	case AgentBuild:
-		allowedTools = []string{"thinking.note", "terminal.run", "file.read", "file.write", "github.build"}
+		allowedTools = []string{"thinking.note", "terminal.run", "file.read", "file.write", "github.build", "sandbox.run"}
 	case AgentSearch:
-		allowedTools = []string{"thinking.note", "web.search", "web.fetch"}
+		allowedTools = []string{"thinking.note", "web.search", "web.fetch", "search_code"}
+	case AgentDebug:
+		allowedTools = []string{"thinking.note", "terminal.run", "analyze_traceback", "run_tests", "fix_test"}
 	}
 
 	systemPrompt := buildSystemPrompt(analysis.AgentType, relevantSkills)
@@ -186,20 +200,25 @@ func buildSystemPrompt(agentType AgentType, skills []skills.Skill) string {
 	switch agentType {
 	case AgentCoder:
 		sb.WriteString("You are an expert programmer. Write clean, efficient, well-documented code.\n")
-		sb.WriteString("Always compile and test code before sending.\n")
+		sb.WriteString("CRITICAL: ALWAYS use file.write tool to save code to files. NEVER write code directly in response text.\n")
+		sb.WriteString("After writing file, use terminal.run to compile and test.\n")
 		sb.WriteString("Use best practices and modern patterns.\n")
 	case AgentDebug:
 		sb.WriteString("You are a debugging expert. Analyze errors systematically.\n")
 		sb.WriteString("Use terminal.run to check logs, files, and system state.\n")
+		sb.WriteString("Use MCP debugger tools to analyze tracebacks.\n")
 	case AgentSearch:
 		sb.WriteString("You are a research assistant. Find accurate, up-to-date information.\n")
 		sb.WriteString("Use web.search and web.fetch to verify facts.\n")
+		sb.WriteString("Use MCP knowledge_base to search existing code.\n")
 	case AgentBuild:
 		sb.WriteString("You are a build engineer. Handle compilation, CI/CD, and deployment.\n")
 		sb.WriteString("Use github.build for CI/CD and terminal.run for local builds.\n")
+		sb.WriteString("Use sandbox.run for testing compiled binaries.\n")
 	case AgentReview:
 		sb.WriteString("You are a code reviewer. Analyze code for bugs, security, performance.\n")
 		sb.WriteString("Provide specific, actionable feedback.\n")
+		sb.WriteString("Use MCP refactor tools to detect complexity issues.\n")
 	default:
 		sb.WriteString("You are a helpful AI assistant.\n")
 	}
@@ -211,11 +230,52 @@ func buildSystemPrompt(agentType AgentType, skills []skills.Skill) string {
 		}
 	}
 
+	sb.WriteString("\nBuilt-in tools:\n")
+	sb.WriteString("```tool_call\n")
+	sb.WriteString(`{"tool":"thinking.note","args":{"note":"your thought"}}`)
+	sb.WriteString("\n```\n")
+	sb.WriteString("```tool_call\n")
+	sb.WriteString(`{"tool":"terminal.run","args":{"cmd":"command"}}`)
+	sb.WriteString("\n```\n")
+	sb.WriteString("```tool_call\n")
+	sb.WriteString(`{"tool":"file.read","args":{"path":"/path"}}`)
+	sb.WriteString("\n```\n")
+	sb.WriteString("```tool_call\n")
+	sb.WriteString(`{"tool":"file.write","args":{"path":"/path","content":"data"}}`)
+	sb.WriteString("\n```\n")
+	sb.WriteString("```tool_call\n")
+	sb.WriteString(`{"tool":"web.search","args":{"query":"search"}}`)
+	sb.WriteString("\n```\n")
+	sb.WriteString("```tool_call\n")
+	sb.WriteString(`{"tool":"web.fetch","args":{"url":"https://..."}}`)
+	sb.WriteString("\n```\n")
+	sb.WriteString("```tool_call\n")
+	sb.WriteString(`{"tool":"github.build","args":{"lang":"go","path":"/path/to/file.go"}}`)
+	sb.WriteString("\n```\n")
+	sb.WriteString("```tool_call\n")
+	sb.WriteString(`{"tool":"sandbox.run","args":{"path":"/path/to/binary"}}`)
+	sb.WriteString("\n```\n")
+
+	sb.WriteString("\nMCP tools (lazy loaded, auto-routed):\n")
+	sb.WriteString("- search_code: Search code in knowledge base\n")
+	sb.WriteString("- analyze_traceback: Debug errors\n")
+	sb.WriteString("- run_tests, fix_test: Auto test code\n")
+	sb.WriteString("- suggest_command, fix_typo, generate_complex_command: Shell helper\n")
+	sb.WriteString("- list_dependencies, check_vulnerabilities, update_dependencies: Package monitor\n")
+	sb.WriteString("- prompt_create, prompt_get, prompt_list, prompt_evaluate: Prompt management\n")
+	sb.WriteString("- blame_line, code_ownership, commit_history, temporal_coupling: Git analysis\n")
+	sb.WriteString("- analyze_complexity, detect_long_methods: Code complexity\n")
+	sb.WriteString("- dependency_graph, circular_dependencies, suggest_modules: Architecture\n")
+	sb.WriteString("- discover_tests: Test discovery\n")
+
 	sb.WriteString("\nRules:\n")
 	sb.WriteString("1. Use thinking.note to plan your approach\n")
 	sb.WriteString("2. Use tools when needed, respond directly when not\n")
-	sb.WriteString("3. Always use ```tool_call format\n")
-	sb.WriteString("4. After writing code, compile and test it\n")
+	sb.WriteString("3. ALWAYS use ```tool_call format\n")
+	sb.WriteString("4. After writing .go file, COMPILE it with terminal.run go build\n")
+	sb.WriteString("5. For Python scripts, use terminal.run python3 or sandbox.run\n")
+	sb.WriteString("6. MCP tools are called same way as built-in tools\n")
+	sb.WriteString("7. You can use MULTIPLE tools in sequence — one tool call per message\n")
 
 	return sb.String()
 }
@@ -264,12 +324,31 @@ func (s *SubAgent) Run(ctx context.Context, chatID int64, task string) (*AgentRe
 			var output string
 			var err error
 
-			if s.MCP != nil && s.isMCPTool(call.Tool) {
-				output, err = s.executeMCPTool(ctx, call)
-			} else {
-				output, err = s.Executor.Execute(ctx, chatID, 0, call)
+			// Сначала пробуем MCP (ленивый auto-routing)
+			if s.MCP != nil {
+				output, err = s.MCP.CallToolAuto(ctx, call.Tool, call.Args)
+				if err == nil {
+					// MCP сработал
+					s.Memory.SaveMessage(chatID, "user", fmt.Sprintf("Tool <%s>:\n%s", call.Tool, output))
+					s.Memory.SaveToolMemory(chatID, call.Tool, output)
+					if call.Tool == "thinking.note" {
+						if note, ok := call.Args["note"].(string); ok {
+							result.ThinkingNotes = append(result.ThinkingNotes, note)
+						}
+					}
+					continue
+				}
+				// Если ошибка не "Unknown tool" — возвращаем её
+				if !strings.Contains(err.Error(), "Unknown") && !strings.Contains(err.Error(), "not found") {
+					output = fmt.Sprintf("MCP error: %v", err)
+					s.Memory.SaveMessage(chatID, "user", fmt.Sprintf("Tool <%s>:\n%s", call.Tool, output))
+					continue
+				}
+				// Иначе пробуем built-in
 			}
 
+			// Built-in tools
+			output, err = s.Executor.Execute(ctx, chatID, 0, call)
 			if err != nil {
 				output = fmt.Sprintf("Error: %v", err)
 			}
@@ -322,31 +401,6 @@ func (s *SubAgent) isToolAllowed(toolName string) bool {
 		}
 	}
 	return false
-}
-
-func (s *SubAgent) isMCPTool(toolName string) bool {
-	tools := s.MCP.ListAllTools()
-	for _, t := range tools {
-		if t.Name == toolName {
-			return true
-		}
-	}
-	return false
-}
-
-func (s *SubAgent) executeMCPTool(ctx context.Context, call ToolCall) (string, error) {
-	tools := s.MCP.ListAllTools()
-	var serverName string
-	for _, t := range tools {
-		if t.Name == call.Tool {
-			serverName = t.Server
-			break
-		}
-	}
-	if serverName == "" {
-		return "", fmt.Errorf("MCP tool not found: %s", call.Tool)
-	}
-	return s.MCP.CallTool(ctx, serverName, call.Tool, call.Args)
 }
 
 func (s *SubAgent) buildMessages(history []memory.Message, task string) []llm.Message {
