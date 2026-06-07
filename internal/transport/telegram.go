@@ -57,6 +57,7 @@ func (t *TelegramTransport) Start() {
 
 func (t *TelegramTransport) handleMessage(msg *tgbotapi.Message) {
 	chatID := msg.Chat.ID
+	log.Printf("[MSG] chat=%d text=%q", chatID, msg.Text)
 
 	if msg.IsCommand() {
 		t.handleCommand(msg)
@@ -68,6 +69,7 @@ func (t *TelegramTransport) handleMessage(msg *tgbotapi.Message) {
 
 func (t *TelegramTransport) handleCommand(msg *tgbotapi.Message) {
 	chatID := msg.Chat.ID
+	log.Printf("[CMD] chat=%d cmd=%s", chatID, msg.Command())
 
 	switch msg.Command() {
 	case "start":
@@ -147,17 +149,25 @@ func (t *TelegramTransport) handleMCPCommand(chatID int64) {
 }
 
 func (t *TelegramTransport) processAgentRequest(chatID int64, text string) {
+	log.Printf("[AGENT] chat=%d query=%q", chatID, text)
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	thinkMsg, _ := t.sendMessage(chatID, "Thinking...")
+	thinkMsg, err := t.sendMessage(chatID, "Thinking...")
+	if err != nil {
+		log.Printf("[ERROR] send thinking: %v", err)
+		return
+	}
+	log.Printf("[AGENT] thinking msg=%d", thinkMsg.MessageID)
 
 	result, err := t.agent.Run(ctx, chatID, text)
 	if err != nil {
-		t.editMessage(chatID, thinkMsg.MessageID, "Error: "+utils.EscapeMarkdownV2(err.Error()))
+		log.Printf("[ERROR] agent run: %v", err)
+		t.editMessage(chatID, thinkMsg.MessageID, "Error: "+err.Error())
 		return
 	}
 
+	log.Printf("[AGENT] result: tokens=%d answer_len=%d", result.TotalTokens, len(result.Answer))
 	response := utils.FormatResponse(result.Answer)
 	tokenInfo := utils.FormatTokenUsage(result.InputTokens, result.OutputTokens, result.TotalTokens)
 	finalText := response + "\n\n" + tokenInfo
@@ -165,17 +175,19 @@ func (t *TelegramTransport) processAgentRequest(chatID int64, text string) {
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("Clear", fmt.Sprintf("action:clear:%d", chatID)),
-			tgbotapi.NewInlineKeyboardButtonData("Regen", fmt.Sprintf("action:regen:%d:%s", chatID, utils.EscapeMarkdownV2(text))),
+			tgbotapi.NewInlineKeyboardButtonData("Regen", fmt.Sprintf("action:regen:%d:%s", chatID, text)),
 		),
 	)
 
 	t.editMessageWithKeyboard(chatID, thinkMsg.MessageID, finalText, keyboard)
+	log.Printf("[AGENT] done")
 }
 
 func (t *TelegramTransport) handleCallback(query *tgbotapi.CallbackQuery) {
 	chatID := query.Message.Chat.ID
 	msgID := query.Message.MessageID
 	data := query.Data
+	log.Printf("[CB] chat=%d data=%q", chatID, data)
 
 	parts := strings.Split(data, ":")
 	if len(parts) < 2 {
