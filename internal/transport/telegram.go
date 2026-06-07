@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"html"
 	"log"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -43,7 +44,7 @@ func (t *TelegramTransport) Start() {
 	u.Timeout = 60
 
 	updates := t.bot.GetUpdatesChan(u)
-	log.Printf("Bot @%s started", t.bot.Self.UserName)
+	log.Printf("[TG] Bot @%s started", t.bot.Self.UserName)
 
 	for update := range updates {
 		if update.Message != nil {
@@ -57,7 +58,7 @@ func (t *TelegramTransport) Start() {
 
 func (t *TelegramTransport) handleMessage(msg *tgbotapi.Message) {
 	chatID := msg.Chat.ID
-	log.Printf("[MSG] chat=%d text=%q", chatID, msg.Text)
+	log.Printf("[TG] Message: chat=%d text=%q", chatID, msg.Text)
 
 	if msg.IsCommand() {
 		t.handleCommand(msg)
@@ -69,7 +70,7 @@ func (t *TelegramTransport) handleMessage(msg *tgbotapi.Message) {
 
 func (t *TelegramTransport) handleCommand(msg *tgbotapi.Message) {
 	chatID := msg.Chat.ID
-	log.Printf("[CMD] chat=%d cmd=%s", chatID, msg.Command())
+	log.Printf("[TG] Command: chat=%d cmd=%s", chatID, msg.Command())
 
 	switch msg.Command() {
 	case "start":
@@ -93,10 +94,10 @@ func (t *TelegramTransport) handleCommand(msg *tgbotapi.Message) {
 		t.sendHTML(chatID, "Bot running\nSQLite connected")
 
 	case "skills":
-		t.handleSkillsCommand(chatID)
+		t.handleSkillsCommand(chatID, 0)
 
 	case "mcp":
-		t.handleMCPCommand(chatID)
+		t.handleMCPCommand(chatID, 0)
 
 	case "oa":
 		query := msg.CommandArguments()
@@ -111,7 +112,7 @@ func (t *TelegramTransport) handleCommand(msg *tgbotapi.Message) {
 	}
 }
 
-func (t *TelegramTransport) handleSkillsCommand(chatID int64) {
+func (t *TelegramTransport) handleSkillsCommand(chatID int64, page int) {
 	all := t.agent.Skills.GetAll()
 	active := t.agent.Skills.GetActive()
 	activeMap := make(map[string]bool)
@@ -119,55 +120,115 @@ func (t *TelegramTransport) handleSkillsCommand(chatID int64) {
 		activeMap[a.Name] = true
 	}
 
+	perPage := 5
+	total := len(all)
+	start := page * perPage
+	end := start + perPage
+	if end > total {
+		end = total
+	}
+
 	var sb strings.Builder
-	sb.WriteString("<b>Skills:</b>\n")
-	for _, s := range all {
-		status := "o"
+	sb.WriteString(fmt.Sprintf("<b>Skills:</b> <code>%d total</code>\n\n", total))
+
+	for i := start; i < end; i++ {
+		s := all[i]
+		status := "○"
 		if activeMap[s.Name] {
-			status = "+"
+			status = "●"
 		}
 		if s.TriggerMode == "always" {
-			status = "*"
+			status = "★"
 		}
-		sb.WriteString(fmt.Sprintf("%s <code>%s</code> (%s)\n", status, s.Name, s.TriggerMode))
+		sb.WriteString(fmt.Sprintf("%s <code>%s</code> — <i>%s</i>\n", status, s.Name, s.Description))
 	}
-	t.sendHTML(chatID, sb.String())
+
+	var rows [][]tgbotapi.InlineKeyboardButton
+	var currentRow []tgbotapi.InlineKeyboardButton
+
+	if page > 0 {
+		currentRow = append(currentRow, tgbotapi.NewInlineKeyboardButtonData("◀ Prev", fmt.Sprintf("page:skills:%d", page-1)))
+	}
+	if end < total {
+		currentRow = append(currentRow, tgbotapi.NewInlineKeyboardButtonData("Next ▶", fmt.Sprintf("page:skills:%d", page+1)))
+	}
+	if len(currentRow) > 0 {
+		rows = append(rows, currentRow)
+	}
+
+	var keyboard tgbotapi.InlineKeyboardMarkup
+	if len(rows) > 0 {
+		keyboard = tgbotapi.NewInlineKeyboardMarkup(rows...)
+		t.sendMessageWithKeyboardHTML(chatID, sb.String(), keyboard)
+	} else {
+		t.sendHTML(chatID, sb.String())
+	}
 }
 
-func (t *TelegramTransport) handleMCPCommand(chatID int64) {
+func (t *TelegramTransport) handleMCPCommand(chatID int64, page int) {
 	tools := t.agent.MCP.ListAllTools()
+	perPage := 5
+	total := len(tools)
+	start := page * perPage
+	end := start + perPage
+	if end > total {
+		end = total
+	}
+
 	var sb strings.Builder
-	sb.WriteString("<b>MCP tools:</b>\n")
-	if len(tools) == 0 {
+	sb.WriteString(fmt.Sprintf("<b>MCP tools:</b> <code>%d total</code>\n\n", total))
+
+	if total == 0 {
 		sb.WriteString("<i>No servers connected</i>")
 	} else {
-		for _, tool := range tools {
-			sb.WriteString(fmt.Sprintf("- <code>%s</code> - %s\n", tool.Name, tool.Description))
+		for i := start; i < end; i++ {
+			tool := tools[i]
+			sb.WriteString(fmt.Sprintf("• <code>%s</code> — <i>%s</i>\n", tool.Name, tool.Description))
 		}
 	}
-	t.sendHTML(chatID, sb.String())
+
+	var rows [][]tgbotapi.InlineKeyboardButton
+	var currentRow []tgbotapi.InlineKeyboardButton
+
+	if page > 0 {
+		currentRow = append(currentRow, tgbotapi.NewInlineKeyboardButtonData("◀ Prev", fmt.Sprintf("page:mcp:%d", page-1)))
+	}
+	if end < total {
+		currentRow = append(currentRow, tgbotapi.NewInlineKeyboardButtonData("Next ▶", fmt.Sprintf("page:mcp:%d", page+1)))
+	}
+	if len(currentRow) > 0 {
+		rows = append(rows, currentRow)
+	}
+
+	var keyboard tgbotapi.InlineKeyboardMarkup
+	if len(rows) > 0 {
+		keyboard = tgbotapi.NewInlineKeyboardMarkup(rows...)
+		t.sendMessageWithKeyboardHTML(chatID, sb.String(), keyboard)
+	} else {
+		t.sendHTML(chatID, sb.String())
+	}
 }
 
 func (t *TelegramTransport) processAgentRequest(chatID int64, text string) {
-	log.Printf("[AGENT] chat=%d query=%q", chatID, text)
+	log.Printf("[TG] Agent request: chat=%d, text=%q", chatID, text)
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
 	thinkMsg, err := t.sendHTML(chatID, "<i>Thinking...</i>")
 	if err != nil {
-		log.Printf("[ERROR] send thinking: %v", err)
+		log.Printf("[TG] ERROR send thinking: %v", err)
 		return
 	}
-	log.Printf("[AGENT] thinking msg=%d", thinkMsg.MessageID)
+	log.Printf("[TG] Thinking msg=%d", thinkMsg.MessageID)
 
 	result, err := t.agent.Run(ctx, chatID, text)
 	if err != nil {
-		log.Printf("[ERROR] agent run: %v", err)
+		log.Printf("[TG] ERROR agent run: %v", err)
 		t.editHTML(chatID, thinkMsg.MessageID, "<b>Error:</b> "+html.EscapeString(err.Error()))
 		return
 	}
 
-	log.Printf("[AGENT] result: tokens=%d answer_len=%d", result.TotalTokens, len(result.Answer))
+	log.Printf("[TG] Agent result: type=%s, tokens=%d, answer=%d chars", result.AgentType, result.TotalTokens, len(result.Answer))
 
 	response := formatToHTML(result.Answer)
 
@@ -182,7 +243,6 @@ func (t *TelegramTransport) processAgentRequest(chatID int64, text string) {
 
 	finalText := response + "\n\n" + tokenInfo
 
-	// FIX: Убрали chatID из callback data для Regen — берём из query.Message.Chat.ID
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("Clear", fmt.Sprintf("action:clear:%d", chatID)),
@@ -191,14 +251,14 @@ func (t *TelegramTransport) processAgentRequest(chatID int64, text string) {
 	)
 
 	t.editMessageWithKeyboardHTML(chatID, thinkMsg.MessageID, finalText, keyboard)
-	log.Printf("[AGENT] done")
+	log.Printf("[TG] Final message edited, done")
 }
 
 func (t *TelegramTransport) handleCallback(query *tgbotapi.CallbackQuery) {
 	chatID := query.Message.Chat.ID
 	msgID := query.Message.MessageID
 	data := query.Data
-	log.Printf("[CB] chat=%d data=%q", chatID, data)
+	log.Printf("[TG] Callback: chat=%d data=%q", chatID, data)
 
 	parts := strings.Split(data, ":")
 	if len(parts) < 2 {
@@ -226,11 +286,21 @@ func (t *TelegramTransport) handleCallback(query *tgbotapi.CallbackQuery) {
 			t.agent.Memory.ClearHistory(chatID)
 			t.editHTML(chatID, msgID, "<b>Memory cleared!</b>")
 		case "regen":
-			// FIX: chatID берём из query.Message.Chat.ID, текст из parts[2:]
 			if len(parts) >= 3 {
 				originalText := strings.Join(parts[2:], ":")
 				t.bot.Request(tgbotapi.NewDeleteMessage(chatID, msgID))
 				t.processAgentRequest(chatID, originalText)
+			}
+		}
+
+	case "page":
+		if len(parts) >= 3 {
+			page, _ := strconv.Atoi(parts[2])
+			switch parts[1] {
+			case "skills":
+				t.handleSkillsCommand(chatID, page)
+			case "mcp":
+				t.handleMCPCommand(chatID, page)
 			}
 		}
 	}
@@ -280,21 +350,34 @@ func formatArgsHTML(args map[string]interface{}) string {
 }
 
 func (t *TelegramTransport) SendFileBytes(chatID int64, name string, data []byte, caption string) error {
+	log.Printf("[TG] Sending file: %s (%d bytes) to chat=%d", name, len(data), chatID)
+
 	file := tgbotapi.NewDocument(chatID, tgbotapi.FileBytes{Name: name, Bytes: data})
 	if caption != "" {
 		file.Caption = caption
 		file.ParseMode = tgbotapi.ModeHTML
 	}
-	_, err := t.bot.Send(file)
+
+	sentMsg, err := t.bot.Send(file)
 	if err != nil {
-		log.Printf("[ERROR] SendFileBytes failed: %v", err)
+		log.Printf("[TG] ERROR SendFileBytes: %v", err)
+		return err
 	}
-	return err
+
+	log.Printf("[TG] File sent: msg_id=%d, file=%s", sentMsg.MessageID, name)
+	return nil
 }
 
 func (t *TelegramTransport) sendHTML(chatID int64, text string) (tgbotapi.Message, error) {
 	msg := tgbotapi.NewMessage(chatID, text)
 	msg.ParseMode = tgbotapi.ModeHTML
+	return t.bot.Send(msg)
+}
+
+func (t *TelegramTransport) sendMessageWithKeyboardHTML(chatID int64, text string, keyboard tgbotapi.InlineKeyboardMarkup) (tgbotapi.Message, error) {
+	msg := tgbotapi.NewMessage(chatID, text)
+	msg.ParseMode = tgbotapi.ModeHTML
+	msg.ReplyMarkup = keyboard
 	return t.bot.Send(msg)
 }
 
@@ -385,6 +468,10 @@ func formatToHTML(text string) string {
 func formatNum(n int) string {
 	if n >= 1000 {
 		return fmt.Sprintf("%.1fk", float64(n)/1000)
+	}
+	return fmt.Sprintf("%d", n)
+}
+t64(n)/1000)
 	}
 	return fmt.Sprintf("%d", n)
 }
