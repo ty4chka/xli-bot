@@ -32,44 +32,42 @@ func (h *HotLoader) LoadFromDir(dir string) error {
 	h.dir = dir
 	os.MkdirAll(dir, 0755)
 
-	if err := h.scanDir(); err != nil {
+	if err := h.scanDirRecursive(dir); err != nil {
 		return err
 	}
 
-	return h.startWatcher(dir)
+	return h.startWatcherRecursive(dir)
 }
 
-func (h *HotLoader) scanDir() error {
-	files, err := os.ReadDir(h.dir)
-	if err != nil {
-		return err
-	}
-
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	for _, file := range files {
-		if file.IsDir() || !strings.HasSuffix(file.Name(), ".md") {
-			continue
+// Рекурсивное сканирование подпапок
+func (h *HotLoader) scanDirRecursive(dir string) error {
+	return filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() || !strings.HasSuffix(info.Name(), ".md") {
+			return nil
 		}
 
-		path := filepath.Join(h.dir, file.Name())
 		skill, err := h.parseSkill(path)
 		if err != nil {
-			continue
+			return nil
 		}
 
+		h.mu.Lock()
 		if existing, ok := h.skills[skill.Name]; ok && existing.Modified.Equal(skill.Modified) {
-			continue
+			h.mu.Unlock()
+			return nil
 		}
 
 		h.skills[skill.Name] = skill
 		if skill.TriggerMode == "always" {
 			h.active[skill.Name] = true
 		}
-	}
+		h.mu.Unlock()
 
-	return nil
+		return nil
+	})
 }
 
 func (h *HotLoader) parseSkill(path string) (*Skill, error) {
@@ -149,16 +147,24 @@ func parseList(s string) []string {
 	return result
 }
 
-func (h *HotLoader) startWatcher(dir string) error {
+// Рекурсивный watcher — добавляем все подпапки
+func (h *HotLoader) startWatcherRecursive(dir string) error {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return err
 	}
 	h.watcher = watcher
 
-	if err := watcher.Add(dir); err != nil {
-		return err
-	}
+	// Добавляем все подпапки
+	filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			watcher.Add(path)
+		}
+		return nil
+	})
 
 	go func() {
 		for {
@@ -175,6 +181,12 @@ func (h *HotLoader) startWatcher(dir string) error {
 						h.handleFileChange(event.Name, "created")
 					case event.Op&fsnotify.Remove == fsnotify.Remove:
 						h.handleFileRemove(event.Name)
+					}
+				}
+				// Если создали новую папку — добавляем в watcher
+				if event.Op&fsnotify.Create == fsnotify.Create {
+					if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
+						watcher.Add(event.Name)
 					}
 				}
 			case <-h.stopWatch:
@@ -209,7 +221,8 @@ func (h *HotLoader) handleFileChange(path, action string) {
 	}
 
 	h.skills[skill.Name] = skill
-	fmt.Printf("🔄 Skill %s: %s\n", action, skill.Name)
+	fmt.Printf("Skill %s: %s
+", action, skill.Name)
 }
 
 func (h *HotLoader) handleFileRemove(path string) {
@@ -220,7 +233,8 @@ func (h *HotLoader) handleFileRemove(path string) {
 		if skill.Source == path {
 			delete(h.skills, name)
 			delete(h.active, name)
-			fmt.Printf("🗑️ Skill removed: %s\n", name)
+			fmt.Printf("Skill removed: %s
+", name)
 			return
 		}
 	}
@@ -293,11 +307,14 @@ func (h *HotLoader) BuildPrompt(query string) string {
 	defer h.mu.RUnlock()
 
 	var parts []string
-	parts = append(parts, "You are XLI-Go Bot with the following skills activated:\n")
+	parts = append(parts, "You are XLI-Go Bot with the following skills activated:
+")
 
 	for name := range h.active {
 		if skill, ok := h.skills[name]; ok {
-			parts = append(parts, fmt.Sprintf("=== %s ===\n%s\n", skill.Name, skill.Content))
+			parts = append(parts, fmt.Sprintf("=== %s ===
+%s
+", skill.Name, skill.Content))
 		}
 	}
 
@@ -308,17 +325,20 @@ func (h *HotLoader) BuildPrompt(query string) string {
 		}
 		for _, kw := range skill.Keywords {
 			if strings.Contains(queryLower, strings.ToLower(kw)) {
-				parts = append(parts, fmt.Sprintf("=== %s (auto-triggered) ===\n%s\n", skill.Name, skill.Content))
+				parts = append(parts, fmt.Sprintf("=== %s (auto-triggered) ===
+%s
+", skill.Name, skill.Content))
 				break
 			}
 		}
 	}
 
-	return strings.Join(parts, "\n")
+	return strings.Join(parts, "
+")
 }
 
 func (h *HotLoader) Reload() error {
-	return h.scanDir()
+	return h.scanDirRecursive(h.dir)
 }
 
 func (h *HotLoader) Close() error {
