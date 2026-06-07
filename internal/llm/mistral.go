@@ -77,7 +77,7 @@ func (c *MistralClient) completeOnce(ctx context.Context, messages []Message, op
 		temp = opts.Temperature
 	}
 
-	maxTokens := 4000
+	maxTokens := 400000
 	if opts != nil && opts.MaxTokens != 0 {
 		maxTokens = opts.MaxTokens
 	}
