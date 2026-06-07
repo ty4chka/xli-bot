@@ -31,6 +31,7 @@ func main() {
 	os.MkdirAll("data", 0755)
 	os.MkdirAll("skills", 0755)
 	os.MkdirAll("mcp_servers", 0755)
+	os.MkdirAll("sandbox", 0755)
 
 	store, err := memory.NewSQLiteStore("data/xli.db")
 	if err != nil {
@@ -39,6 +40,7 @@ func main() {
 	defer store.Close()
 	log.Println("SQLite OK")
 
+	// Skills: ленивая загрузка — сканируем при старте, но в контекст идут только релевантные
 	skillRegistry := skills.NewHotLoader()
 	if err := skillRegistry.LoadFromDir("skills"); err != nil {
 		log.Printf("Skills warning: %v", err)
@@ -66,8 +68,13 @@ func main() {
 
 	executor := agent.NewToolExecutor(tg)
 	botAgent := agent.NewAgent(llmClient, store, executor, skillRegistry, mcpClient)
+	
+	// Orchestrator для мультиагентности
+	orchestrator := agent.NewOrchestrator(botAgent, llmClient)
+	botAgent.SetOrchestrator(orchestrator)
+	
 	tg.SetAgent(botAgent)
-	log.Println("Agent created")
+	log.Println("Agent + Orchestrator created")
 
 	go func() {
 		ticker := time.NewTicker(5 * time.Minute)
