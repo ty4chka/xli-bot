@@ -73,24 +73,15 @@ func (t *TelegramTransport) handleCommand(msg *tgbotapi.Message) {
 
 	switch msg.Command() {
 	case "start":
-		t.sendHTML(chatID, "<b>XLI Bot</b> started!
-
-Use <code>/oa &lt;query&gt;</code> or just text me.")
+		t.sendHTML(chatID, "<b>XLI Bot</b> started!\n\nUse <code>/oa &lt;query&gt;</code> or just text me.")
 
 	case "help":
-		help := "<b>Commands:</b>
-" +
-			"<code>/oa &lt;query&gt;</code> - ask agent
-" +
-			"<code>/clear</code> - clear memory
-" +
-			"<code>/skills</code> - list skills
-" +
-			"<code>/mcp</code> - MCP status
-" +
-			"<code>/status</code> - bot status
-
-" +
+		help := "<b>Commands:</b>\n" +
+			"<code>/oa &lt;query&gt;</code> - ask agent\n" +
+			"<code>/clear</code> - clear memory\n" +
+			"<code>/skills</code> - list skills\n" +
+			"<code>/mcp</code> - MCP status\n" +
+			"<code>/status</code> - bot status\n\n" +
 			"Just text me - I will respond."
 		t.sendHTML(chatID, help)
 
@@ -99,8 +90,7 @@ Use <code>/oa &lt;query&gt;</code> or just text me.")
 		t.sendHTML(chatID, "<b>Memory cleared!</b>")
 
 	case "status":
-		t.sendHTML(chatID, "Bot running
-SQLite connected")
+		t.sendHTML(chatID, "Bot running\nSQLite connected")
 
 	case "skills":
 		t.handleSkillsCommand(chatID)
@@ -130,9 +120,7 @@ func (t *TelegramTransport) handleSkillsCommand(chatID int64) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString("<b>Skills:</b>
-
-")
+	sb.WriteString("<b>Skills:</b>\n")
 	for _, s := range all {
 		status := "o"
 		if activeMap[s.Name] {
@@ -141,8 +129,7 @@ func (t *TelegramTransport) handleSkillsCommand(chatID int64) {
 		if s.TriggerMode == "always" {
 			status = "*"
 		}
-		sb.WriteString(fmt.Sprintf("%s <code>%s</code> (%s)
-", status, s.Name, s.TriggerMode))
+		sb.WriteString(fmt.Sprintf("%s <code>%s</code> (%s)\n", status, s.Name, s.TriggerMode))
 	}
 	t.sendHTML(chatID, sb.String())
 }
@@ -150,15 +137,12 @@ func (t *TelegramTransport) handleSkillsCommand(chatID int64) {
 func (t *TelegramTransport) handleMCPCommand(chatID int64) {
 	tools := t.agent.MCP.ListAllTools()
 	var sb strings.Builder
-	sb.WriteString("<b>MCP tools:</b>
-
-")
+	sb.WriteString("<b>MCP tools:</b>\n")
 	if len(tools) == 0 {
 		sb.WriteString("<i>No servers connected</i>")
 	} else {
 		for _, tool := range tools {
-			sb.WriteString(fmt.Sprintf("- <code>%s</code> - %s
-", tool.Name, tool.Description))
+			sb.WriteString(fmt.Sprintf("- <code>%s</code> - %s\n", tool.Name, tool.Description))
 		}
 	}
 	t.sendHTML(chatID, sb.String())
@@ -188,9 +172,7 @@ func (t *TelegramTransport) processAgentRequest(chatID int64, text string) {
 	response := formatToHTML(result.Answer)
 
 	if len(response) > 500 {
-		response = "<blockquote expandable>
-" + response + "
-</blockquote>"
+		response = "<blockquote expandable>\n" + response + "\n</blockquote>"
 	}
 
 	tokenInfo := fmt.Sprintf("<i>Tokens: in %s out %s total %s</i>",
@@ -198,9 +180,7 @@ func (t *TelegramTransport) processAgentRequest(chatID int64, text string) {
 		formatNum(result.OutputTokens),
 		formatNum(result.TotalTokens))
 
-	finalText := response + "
-
-" + tokenInfo
+	finalText := response + "\n\n" + tokenInfo
 
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
@@ -264,13 +244,7 @@ func (t *TelegramTransport) ShowConfirmation(chatID int64, msgID int, toolName s
 	t.mu.Unlock()
 
 	argsStr := formatArgsHTML(args)
-	text := fmt.Sprintf("<b>Confirm action:</b>
-
-<b>Tool:</b> <code>%s</code>
-<b>Args:</b>
-%s
-
-Execute?", toolName, argsStr)
+	text := fmt.Sprintf("<b>Confirm action:</b>\n\n<b>Tool:</b> <code>%s</code>\n<b>Args:</b>\n%s\n\nExecute?", toolName, argsStr)
 
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
@@ -300,8 +274,7 @@ func formatArgsHTML(args map[string]interface{}) string {
 	for k, v := range args {
 		parts = append(parts, fmt.Sprintf("  - <b>%s:</b> <code>%v</code>", k, v))
 	}
-	return strings.Join(parts, "
-")
+	return strings.Join(parts, "\n")
 }
 
 func (t *TelegramTransport) SendFileBytes(chatID int64, name string, data []byte, caption string) error {
@@ -395,8 +368,7 @@ func formatToHTML(text string) string {
 		}
 		endIdx += idx + 3
 		inner := text[idx+3 : endIdx]
-		if nl := strings.Index(inner, "
-"); nl > 0 && nl < 20 {
+		if nl := strings.Index(inner, "\n"); nl > 0 && nl < 20 {
 			inner = inner[nl+1:]
 		}
 		text = text[:idx] + "<pre><code>" + inner + "</code></pre>" + text[endIdx+3:]
