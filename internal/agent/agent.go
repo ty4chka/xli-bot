@@ -45,7 +45,7 @@ func NewAgent(llmClient llm.Client, store memory.Store, executor *ToolExecutor, 
 }
 
 func (a *Agent) SetOrchestrator(o *Orchestrator) {
-	a.Orchestrator = o
+	Orchestrator = o
 }
 
 func (a *Agent) Run(ctx context.Context, chatID int64, task string) (*AgentResult, error) {
@@ -88,7 +88,7 @@ func (a *Agent) Run(ctx context.Context, chatID int64, task string) (*AgentResul
 		response, err := a.LLM.Complete(ctx, messages, &llm.CompletionOpts{
 			Model:       "mistral-large-latest",
 			Temperature: 0.7,
-			MaxTokens:   4000,
+			MaxTokens:   32000,  // ФИКС: 32K для длинных ответов
 		})
 		if err != nil {
 			log.Printf("[AGENT] LLM error: %v", err)
@@ -198,9 +198,21 @@ func (a *Agent) buildMessages(history []memory.Message, task, skillPrompt string
 	var messages []llm.Message
 
 	var sb strings.Builder
-	sb.WriteString("You are XLI-Go Bot, an AI assistant with tool calling capabilities.\n\n")
+	// ФИКС: краткий системный промпт
+	sb.WriteString("You are XLI-Go Bot, an AI assistant.\n\n")
+	sb.WriteString("CRITICAL RULES:\n")
+	sb.WriteString("1. Be CONCISE. 2-3 sentences max unless asked for details.\n")
+	sb.WriteString("2. Use tools for code/files. NEVER put code in text response.\n")
+	sb.WriteString("3. Use thinking.note to plan\n")
+	sb.WriteString("4. Use web.search for current info\n")
+	sb.WriteString("5. ALWAYS use ```tool_call format\n")
+	sb.WriteString("6. After writing .go file, COMPILE with terminal.run go build\n")
+	sb.WriteString("7. MCP tools are called SAME WAY as built-in tools\n")
+	sb.WriteString("8. You can use MULTIPLE tools in sequence\n")
+	sb.WriteString("9. ALWAYS use file.write for code, NEVER in response text\n")
+	sb.WriteString("10. For Python scripts, use terminal.run python3 or sandbox.run\n")
 
-	sb.WriteString("Built-in tools:\n")
+	sb.WriteString("\nBuilt-in tools:\n")
 	sb.WriteString("```tool_call\n")
 	sb.WriteString(`{"tool":"thinking.note","args":{"note":"your thought"}}`)
 	sb.WriteString("\n```\n")
@@ -226,7 +238,7 @@ func (a *Agent) buildMessages(history []memory.Message, task, skillPrompt string
 	sb.WriteString(`{"tool":"sandbox.run","args":{"path":"/path/to/binary"}}`)
 	sb.WriteString("\n```\n")
 
-	sb.WriteString("\nMCP tools (lazy loaded, auto-routed — use same format):\n")
+	sb.WriteString("\nMCP tools (lazy loaded, auto-routed):\n")
 	sb.WriteString("- search_code: Search code in knowledge base\n")
 	sb.WriteString("- analyze_traceback: Debug errors\n")
 	sb.WriteString("- run_tests, fix_test: Auto test code\n")
@@ -237,17 +249,6 @@ func (a *Agent) buildMessages(history []memory.Message, task, skillPrompt string
 	sb.WriteString("- analyze_complexity, detect_long_methods: Code complexity\n")
 	sb.WriteString("- dependency_graph, circular_dependencies, suggest_modules: Architecture\n")
 	sb.WriteString("- discover_tests: Test discovery\n")
-
-	sb.WriteString("\nCRITICAL RULES:\n")
-	sb.WriteString("1. Use thinking.note to plan\n")
-	sb.WriteString("2. Use web.search for current info\n")
-	sb.WriteString("3. Respond normally when no tools needed\n")
-	sb.WriteString("4. ALWAYS use ```tool_call format\n")
-	sb.WriteString("5. After writing .go file, COMPILE it with terminal.run go build\n")
-	sb.WriteString("6. For Python scripts, use terminal.run python3 or sandbox.run\n")
-	sb.WriteString("7. MCP tools are called SAME WAY as built-in tools\n")
-	sb.WriteString("8. You can use MULTIPLE tools in sequence\n")
-	sb.WriteString("9. ALWAYS use file.write for code, NEVER put code in response text\n")
 
 	if skillPrompt != "" {
 		sb.WriteString("\n")
@@ -287,7 +288,7 @@ func (a *Agent) SimpleAsk(ctx context.Context, task string) (*AgentResult, error
 	}, &llm.CompletionOpts{
 		Model:       "mistral-large-latest",
 		Temperature: 0.7,
-		MaxTokens:   4000,
+		MaxTokens:   32000,
 	})
 	if err != nil {
 		return nil, err
