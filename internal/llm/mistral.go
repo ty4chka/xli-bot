@@ -6,8 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
+	"strings"
+	"time"
 )
 
 type MistralClient struct {
@@ -32,6 +35,31 @@ func NewMistralClient(apiKey, provider string) Client {
 }
 
 func (c *MistralClient) Complete(ctx context.Context, messages []Message, opts *CompletionOpts) (*CompletionResult, error) {
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			backoff := time.Duration(attempt) * 2 * time.Second
+			log.Printf("[LLM] Retry %d after %v", attempt, backoff)
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+
+		result, err := c.completeOnce(ctx, messages, opts)
+		if err == nil {
+			return result, nil
+		}
+		lastErr = err
+		if !isRateLimit(err) {
+			return nil, err
+		}
+	}
+	return nil, fmt.Errorf("rate limit after retries: %w", lastErr)
+}
+
+func (c *MistralClient) completeOnce(ctx context.Context, messages []Message, opts *CompletionOpts) (*CompletionResult, error) {
 	baseURL := "https://api.mistral.ai/v1"
 	if c.provider == "groq" {
 		baseURL = "https://api.groq.com/openai/v1"
@@ -66,6 +94,8 @@ func (c *MistralClient) Complete(ctx context.Context, messages []Message, opts *
 		return nil, err
 	}
 
+	log.Printf("[LLM] Request: model=%s, messages=%d, max_tokens=%d", model, len(messages), maxTokens)
+
 	req, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/chat/completions", bytes.NewReader(jsonBody))
 	if err != nil {
 		return nil, err
@@ -85,7 +115,12 @@ func (c *MistralClient) Complete(ctx context.Context, messages []Message, opts *
 		return nil, err
 	}
 
+	if resp.StatusCode == 429 {
+		log.Printf("[LLM] Rate limited")
+		return nil, fmt.Errorf("API error 429: %s", string(body))
+	}
 	if resp.StatusCode != 200 {
+		log.Printf("[LLM] API error %d: %s", resp.StatusCode, string(body))
 		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
 	}
 
@@ -110,12 +145,23 @@ func (c *MistralClient) Complete(ctx context.Context, messages []Message, opts *
 		return nil, fmt.Errorf("no choices in response")
 	}
 
+	log.Printf("[LLM] Response: tokens=%d in/%d out/%d total, content=%d chars",
+		result.Usage.PromptTokens, result.Usage.CompletionTokens, result.Usage.TotalTokens,
+		len(result.Choices[0].Message.Content))
+
 	return &CompletionResult{
 		Content:      result.Choices[0].Message.Content,
 		InputTokens:  result.Usage.PromptTokens,
 		OutputTokens: result.Usage.CompletionTokens,
 		TotalTokens:  result.Usage.TotalTokens,
 	}, nil
+}
+
+func isRateLimit(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "429") || strings.Contains(err.Error(), "rate_limit")
 }
 
 func convertMessages(msgs []Message) []map[string]string {
