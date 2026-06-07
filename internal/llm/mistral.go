@@ -77,7 +77,8 @@ func (c *MistralClient) completeOnce(ctx context.Context, messages []Message, op
 		temp = opts.Temperature
 	}
 
-	maxTokens := 400000
+	// ФИКС: 32K токенов на выход (максимум для Mistral Large)
+	maxTokens := 32000
 	if opts != nil && opts.MaxTokens != 0 {
 		maxTokens = opts.MaxTokens
 	}
