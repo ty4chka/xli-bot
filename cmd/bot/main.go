@@ -47,20 +47,43 @@ func main() {
 	}
 	log.Printf("Skills loaded: %d", len(skillRegistry.GetAll()))
 
-	// MCP — ленивая загрузка, только регистрация, без eager connect
+	// MCP — регистрация серверов
 	mcpClient := mcp.NewClient()
-	mcpServers, err := mcp.AutoDiscover("mcp_servers")
+
+	// Ручная регистрация всех MCP серверов
+	mcpServers := []mcp.MCPServer{
+		{Name: "debugger", Script: "./mcp_servers/mcp-debugger-cli.py", Enabled: true},
+		{Name: "knowledge", Script: "./mcp_servers/mcp-knowledge-cli.py", Enabled: true},
+		{Name: "package-monitor", Script: "./mcp_servers/mcp-package-monitor-cli.py", Enabled: true},
+		{Name: "shell-helper", Script: "./mcp_servers/mcp-shell-helper-cli.py", Enabled: true},
+		{Name: "prompt-cli", Script: "./mcp_servers/prompt-cli.py", Enabled: true},
+		{Name: "archaeologist", Script: "./mcp_servers/archaeologist_cli.py", Enabled: true},
+		{Name: "refactor", Script: "./mcp_servers/refactor_cli.py", Enabled: true},
+		{Name: "architecture", Script: "./mcp_servers/architecture_cli.py", Enabled: true},
+		{Name: "auto-tester", Script: "./mcp_servers/mcp-auto-tester-cli.py", Enabled: true},
+	}
+
+	for _, srv := range mcpServers {
+		if err := mcpClient.Register(srv); err != nil {
+			log.Printf("MCP register error %s: %v", srv.Name, err)
+		} else {
+			log.Printf("MCP registered: %s", srv.Name)
+		}
+	}
+
+	// AutoDiscover как fallback
+	autoServers, err := mcp.AutoDiscover("mcp_servers")
 	if err != nil {
-		log.Printf("MCP warning: %v", err)
+		log.Printf("MCP autodiscover warning: %v", err)
 	} else {
-		for _, server := range mcpServers {
-			if err := mcpClient.Register(server); err != nil {
-				log.Printf("MCP register error %s: %v", server.Name, err)
+		for _, srv := range autoServers {
+			if err := mcpClient.Register(srv); err != nil {
+				log.Printf("MCP autodiscover register error %s: %v", srv.Name, err)
 			}
 		}
-		// НЕ делаем Connect здесь — ленивое подключение при первом вызове
 	}
-	log.Printf("MCP servers: %d registered (lazy load)", len(mcpServers))
+
+	log.Printf("MCP servers: %d registered (lazy load)", len(mcpClient.GetServerNames()))
 
 	llmClient := llm.NewMistralClient(cfg.LLM.APIKey, cfg.LLM.Provider)
 	log.Println("LLM client created")
