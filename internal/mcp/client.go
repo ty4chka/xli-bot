@@ -8,9 +8,16 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 )
+
+type Tool struct {
+	Name        string
+	Description string
+	Server      string
+}
 
 type Client struct {
 	servers map[string]*ServerConn
@@ -39,6 +46,7 @@ type MCPServer struct {
 	Enabled bool
 	IsNPX   bool
 }
+
 
 func NewClient() *Client {
 	return &Client{
