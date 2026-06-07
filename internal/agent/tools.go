@@ -10,11 +10,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/oblachko/xli-bot/internal/sandbox"
 	"github.com/oblachko/xli-bot/internal/utils"
 )
 
 type ToolExecutor struct {
 	transport Transport
+	sandbox   *sandbox.Sandbox
 }
 
 type Transport interface {
@@ -22,8 +24,11 @@ type Transport interface {
 	SendFileBytes(chatID int64, name string, data []byte, caption string) error
 }
 
-func NewToolExecutor(t Transport) *ToolExecutor {
-	return &ToolExecutor{transport: t}
+func NewToolExecutor(t Transport, sbx *sandbox.Sandbox) *ToolExecutor {
+	return &ToolExecutor{
+		transport: t,
+		sandbox:   sbx,
+	}
 }
 
 func (te *ToolExecutor) Execute(ctx context.Context, chatID int64, msgID int, call ToolCall) (string, error) {
@@ -44,6 +49,8 @@ func (te *ToolExecutor) Execute(ctx context.Context, chatID int64, msgID int, ca
 		return te.webFetch(ctx, call.Args)
 	case "github.build":
 		return te.githubBuild(ctx, chatID, msgID, call.Args)
+	case "sandbox.run":
+		return te.sandboxRun(ctx, chatID, msgID, call.Args)
 	default:
 		return "", fmt.Errorf("unknown tool: %s", call.Tool)
 	}
@@ -115,6 +122,11 @@ func (te *ToolExecutor) fileWrite(ctx context.Context, chatID int64, msgID int, 
 		}
 	}
 
+	dir := filepath.Dir(path)
+	if dir != "." && dir != "" {
+		os.MkdirAll(dir, 0755)
+	}
+
 	err := os.WriteFile(path, []byte(content), 0644)
 	if err != nil {
 		log.Printf("[TOOL] file.write error: %v", err)
@@ -125,14 +137,12 @@ func (te *ToolExecutor) fileWrite(ctx context.Context, chatID int64, msgID int, 
 	fileName := filepath.Base(path)
 	data := []byte(content)
 
-	// Отправляем исходник
 	log.Printf("[TOOL] Sending source file: %s", fileName)
 	if err := te.transport.SendFileBytes(chatID, fileName, data,
 		fmt.Sprintf("📄 <code>%s</code> (%d bytes)", fileName, len(data))); err != nil {
 		log.Printf("[TOOL] Send source error: %v", err)
 	}
 
-	// Авто-компиляция для .go
 	if strings.HasSuffix(path, ".go") {
 		log.Printf("[TOOL] Auto-compiling Go: %s", path)
 		dir := filepath.Dir(path)
@@ -149,13 +159,12 @@ func (te *ToolExecutor) fileWrite(ctx context.Context, chatID int64, msgID int, 
 		compileOutput, compileErr := cmd.CombinedOutput()
 		if compileErr != nil {
 			log.Printf("[TOOL] Compile error: %v\n%s", compileErr, string(compileOutput))
-			return fmt.Sprintf("Written: %s (%d bytes)\n❌ Compile error: %v\n%s",
+			return fmt.Sprintf("✅ Written: %s (%d bytes)\n❌ Compile error: %v\n%s",
 				path, len(data), compileErr, string(compileOutput)), nil
 		}
 
 		log.Printf("[TOOL] Compiled: %s", binName)
 
-		// Отправляем бинарник
 		binPath := filepath.Join(dir, binName)
 		if binData, err := os.ReadFile(binPath); err == nil {
 			log.Printf("[TOOL] Sending binary: %s (%d bytes)", binName, len(binData))
@@ -169,7 +178,6 @@ func (te *ToolExecutor) fileWrite(ctx context.Context, chatID int64, msgID int, 
 			path, len(data), binName, string(compileOutput)), nil
 	}
 
-	// Авто-запуск для .py
 	if strings.HasSuffix(path, ".py") {
 		log.Printf("[TOOL] Auto-running Python: %s", path)
 		runCmd := fmt.Sprintf("python3 %s", path)
@@ -177,7 +185,7 @@ func (te *ToolExecutor) fileWrite(ctx context.Context, chatID int64, msgID int, 
 		runOutput, runErr := cmd.CombinedOutput()
 		if runErr != nil {
 			log.Printf("[TOOL] Python run error: %v", runErr)
-			return fmt.Sprintf("Written: %s (%d bytes)\n❌ Run error: %v\n%s",
+			return fmt.Sprintf("✅ Written: %s (%d bytes)\n❌ Run error: %v\n%s",
 				path, len(data), runErr, string(runOutput)), nil
 		}
 		log.Printf("[TOOL] Python run success: %d chars", len(runOutput))
@@ -218,6 +226,39 @@ func (te *ToolExecutor) githubBuild(ctx context.Context, chatID int64, msgID int
 		return "Cancelled by user", nil
 	}
 	return "GitHub Actions dispatched! (stub)", nil
+}
+
+func (te *ToolExecutor) sandboxRun(ctx context.Context, chatID int64, msgID int, args map[string]interface{}) (string, error) {
+	if te.sandbox == nil {
+		return "Sandbox not available", nil
+	}
+
+	path, _ := args["path"].(string)
+	if path == "" {
+		return "", fmt.Errorf("no path")
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+
+	filename := filepath.Base(path)
+	te.sandbox.WriteFile(filename, data)
+
+	var output string
+	var runErr error
+
+	if strings.HasSuffix(path, ".py") {
+		output, runErr = te.sandbox.PythonRun(filename)
+	} else {
+		output, runErr = te.sandbox.RunCommand(ctx, fmt.Sprintf("./%s", filename))
+	}
+
+	if runErr != nil {
+		return fmt.Sprintf("Sandbox error: %v\n%s", runErr, output), nil
+	}
+	return output, nil
 }
 
 func isDangerous(cmd string) bool {
