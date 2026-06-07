@@ -74,7 +74,7 @@ func (c *Client) Register(server MCPServer) error {
 	return nil
 }
 
-// Ленивое подключение — без initialize, сразу готов к tools/call
+// Ленивое подключение
 func (c *Client) ensureConnected(serverName string) (*ServerConn, error) {
 	c.mu.RLock()
 	conn, ok := c.servers[serverName]
@@ -125,7 +125,7 @@ func (c *Client) ensureConnected(serverName string) (*ServerConn, error) {
 	return conn, nil
 }
 
-// CallTool — ленивый вызов, без initialize
+// CallTool
 func (c *Client) CallTool(ctx context.Context, serverName, toolName string, args map[string]interface{}) (string, error) {
 	conn, err := c.ensureConnected(serverName)
 	if err != nil {
@@ -152,7 +152,6 @@ func (c *Client) CallTool(ctx context.Context, serverName, toolName string, args
 
 	resp, err := c.readResponse(conn)
 	if err != nil {
-		// Пробуем реконнект один раз
 		conn.connected = false
 		if newConn, reconnectErr := c.ensureConnected(serverName); reconnectErr == nil {
 			newConn.mu.Lock()
@@ -181,35 +180,88 @@ func (c *Client) CallTool(ctx context.Context, serverName, toolName string, args
 	return "", fmt.Errorf("empty response")
 }
 
-// CallToolAuto — автоматически выбирает сервер по имени тулзы
+// CallToolAuto — ФИКС deadlock
 func (c *Client) CallToolAuto(ctx context.Context, toolName string, args map[string]interface{}) (string, error) {
-	// Ищем сервер, у которого есть этот тул
 	c.mu.RLock()
+	serverNames := make([]string, 0, len(c.servers))
 	for name, conn := range c.servers {
-		if !conn.Enabled {
-			continue
+		if conn.Enabled {
+			serverNames = append(serverNames, name)
 		}
-		// Проверяем, есть ли тул у этого сервера
-		// Для ленивого режима — пробуем вызвать, если ошибка "Unknown tool" — пробуем следующий
-		c.mu.RUnlock()
+	}
+	c.mu.RUnlock()
+
+	for _, name := range serverNames {
 		result, err := c.CallTool(ctx, name, toolName, args)
 		if err == nil {
 			return result, nil
 		}
-		if err != nil && !strings.Contains(err.Error(), "Unknown") {
+		if !strings.Contains(err.Error(), "Unknown") && !strings.Contains(err.Error(), "not found") {
 			return "", err
 		}
-		c.mu.RLock()
 	}
-	c.mu.RUnlock()
 
 	return "", fmt.Errorf("tool not found in any MCP server: %s", toolName)
 }
 
+// ListAllTools — возвращает список зарегистрированных серверов как тулзы
 func (c *Client) ListAllTools() []Tool {
-	// Для ленивого режима — возвращаем пустой список или хардкоженый
-	// Агенты будут пробовать вызывать тулзы напрямую
-	return []Tool{}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	var tools []Tool
+	for name, conn := range c.servers {
+		status := "disabled"
+		if conn.Enabled {
+			status = "enabled"
+		}
+		if conn.connected {
+			status = "connected"
+		}
+		tools = append(tools, Tool{
+			Name:        name,
+			Description: fmt.Sprintf("MCP server (%s)", status),
+			Server:      name,
+		})
+	}
+	return tools
+}
+
+// GetServerNames — для логов
+func (c *Client) GetServerNames() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	names := make([]string, 0, len(c.servers))
+	for name := range c.servers {
+		names = append(names, name)
+	}
+	return names
+}
+
+// Status — строка статуса для /mcp
+func (c *Client) Status() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	var sb strings.Builder
+	total := len(c.servers)
+	connected := 0
+	enabled := 0
+	for name, conn := range c.servers {
+		if conn.Enabled {
+			enabled++
+		}
+		if conn.connected {
+			connected++
+			sb.WriteString(fmt.Sprintf("  ✅ <b>%s</b> — connected\n", name))
+		} else if conn.Enabled {
+			sb.WriteString(fmt.Sprintf("  ⏳ <b>%s</b> — ready (lazy)\n", name))
+		} else {
+			sb.WriteString(fmt.Sprintf("  ❌ <b>%s</b> — disabled\n", name))
+		}
+	}
+	return fmt.Sprintf("<b>MCP servers:</b> <code>%d total</code> | <code>%d enabled</code> | <code>%d connected</code>\n\n%s", total, enabled, connected, sb.String())
 }
 
 func (c *Client) Disconnect(serverName string) error {
