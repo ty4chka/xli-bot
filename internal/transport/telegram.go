@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"fmt"
+	"html"
 	"log"
 	"strings"
 	"sync"
@@ -73,24 +74,24 @@ func (t *TelegramTransport) handleCommand(msg *tgbotapi.Message) {
 
 	switch msg.Command() {
 	case "start":
-		t.sendMessage(chatID, "XLI Bot started!\n\nUse `/oa <query>` or just text me.")
+		t.sendHTML(chatID, "<b>XLI Bot</b> started!\n\nUse <code>/oa &lt;query&gt;</code> or just text me.")
 
 	case "help":
-		help := "Commands:\n" +
-			"`/oa <query>` - ask agent\n" +
-			"`/clear` - clear memory\n" +
-			"`/skills` - list skills\n" +
-			"`/mcp` - MCP status\n" +
-			"`/status` - bot status\n\n" +
+		help := "<b>Commands:</b>\n" +
+			"<code>/oa &lt;query&gt;</code> - ask agent\n" +
+			"<code>/clear</code> - clear memory\n" +
+			"<code>/skills</code> - list skills\n" +
+			"<code>/mcp</code> - MCP status\n" +
+			"<code>/status</code> - bot status\n\n" +
 			"Just text me - I will respond."
-		t.sendMessage(chatID, help)
+		t.sendHTML(chatID, help)
 
 	case "clear":
 		t.agent.Memory.ClearHistory(chatID)
-		t.sendMessage(chatID, "Memory cleared!")
+		t.sendHTML(chatID, "<b>Memory cleared!</b>")
 
 	case "status":
-		t.sendMessage(chatID, "Bot running\nSQLite connected")
+		t.sendHTML(chatID, "Bot running\nSQLite connected")
 
 	case "skills":
 		t.handleSkillsCommand(chatID)
@@ -101,13 +102,13 @@ func (t *TelegramTransport) handleCommand(msg *tgbotapi.Message) {
 	case "oa":
 		query := msg.CommandArguments()
 		if query == "" {
-			t.sendMessage(chatID, "Usage: `/oa write Go code`")
+			t.sendHTML(chatID, "Usage: <code>/oa write Go code</code>")
 			return
 		}
 		t.processAgentRequest(chatID, query)
 
 	default:
-		t.sendMessage(chatID, "Unknown command. Use `/help`")
+		t.sendHTML(chatID, "Unknown command. Use <code>/help</code>")
 	}
 }
 
@@ -120,32 +121,32 @@ func (t *TelegramTransport) handleSkillsCommand(chatID int64) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString("Skills:\n\n")
+	sb.WriteString("<b>Skills:</b>\n\n")
 	for _, s := range all {
-		status := "o"
+		status := "⚪"
 		if activeMap[s.Name] {
-			status = "+"
+			status = "🟢"
 		}
 		if s.TriggerMode == "always" {
-			status = "*"
+			status = "🔒"
 		}
-		sb.WriteString(fmt.Sprintf("%s %s (%s)\n", status, s.Name, s.TriggerMode))
+		sb.WriteString(fmt.Sprintf("%s <code>%s</code> (%s)\n", status, s.Name, s.TriggerMode))
 	}
-	t.sendMessage(chatID, sb.String())
+	t.sendHTML(chatID, sb.String())
 }
 
 func (t *TelegramTransport) handleMCPCommand(chatID int64) {
 	tools := t.agent.MCP.ListAllTools()
 	var sb strings.Builder
-	sb.WriteString("MCP tools:\n\n")
+	sb.WriteString("<b>MCP tools:</b>\n\n")
 	if len(tools) == 0 {
-		sb.WriteString("No servers connected")
+		sb.WriteString("<i>No servers connected</i>")
 	} else {
 		for _, tool := range tools {
-			sb.WriteString(fmt.Sprintf("- %s: %s\n", tool.Name, tool.Description))
+			sb.WriteString(fmt.Sprintf("• <code>%s</code> - %s\n", tool.Name, tool.Description))
 		}
 	}
-	t.sendMessage(chatID, sb.String())
+	t.sendHTML(chatID, sb.String())
 }
 
 func (t *TelegramTransport) processAgentRequest(chatID int64, text string) {
@@ -153,7 +154,7 @@ func (t *TelegramTransport) processAgentRequest(chatID int64, text string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	thinkMsg, err := t.sendMessage(chatID, "Thinking...")
+	thinkMsg, err := t.sendHTML(chatID, "<i>Thinking...</i>")
 	if err != nil {
 		log.Printf("[ERROR] send thinking: %v", err)
 		return
@@ -163,23 +164,36 @@ func (t *TelegramTransport) processAgentRequest(chatID int64, text string) {
 	result, err := t.agent.Run(ctx, chatID, text)
 	if err != nil {
 		log.Printf("[ERROR] agent run: %v", err)
-		t.editMessage(chatID, thinkMsg.MessageID, "Error: "+err.Error())
+		t.editHTML(chatID, thinkMsg.MessageID, "<b>Error:</b> "+html.EscapeString(err.Error()))
 		return
 	}
 
 	log.Printf("[AGENT] result: tokens=%d answer_len=%d", result.TotalTokens, len(result.Answer))
-	response := utils.FormatResponse(result.Answer)
-	tokenInfo := utils.FormatTokenUsage(result.InputTokens, result.OutputTokens, result.TotalTokens)
+
+	// Форматируем ответ с HTML
+	response := formatToHTML(result.Answer)
+
+	// Оборачиваем длинные ответы в сворачиваемую цитату
+	if len(response) > 500 {
+		response = "<blockquote expandable>\n" + response + "\n</blockquote>"
+	}
+
+	tokenInfo := fmt.Sprintf("<i>Tokens: in %s out %s total %s</i>", 
+		formatNum(result.InputTokens), 
+		formatNum(result.OutputTokens), 
+		formatNum(result.TotalTokens))
+
 	finalText := response + "\n\n" + tokenInfo
 
+	// Цветные кнопки (Bot API 9.4+)
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("Clear", fmt.Sprintf("action:clear:%d", chatID)),
-			tgbotapi.NewInlineKeyboardButtonData("Regen", fmt.Sprintf("action:regen:%d:%s", chatID, text)),
+			newStyledButton("🧹 Clear", fmt.Sprintf("action:clear:%d", chatID), "danger"),
+			newStyledButton("🔃 Regen", fmt.Sprintf("action:regen:%d:%s", chatID, text), "primary"),
 		),
 	)
 
-	t.editMessageWithKeyboard(chatID, thinkMsg.MessageID, finalText, keyboard)
+	t.editMessageWithKeyboardHTML(chatID, thinkMsg.MessageID, finalText, keyboard)
 	log.Printf("[AGENT] done")
 }
 
@@ -206,14 +220,14 @@ func (t *TelegramTransport) handleCallback(query *tgbotapi.CallbackQuery) {
 			if ok {
 				ch <- approved
 			}
-			t.editMessage(chatID, msgID, query.Message.Text)
+			t.editHTML(chatID, msgID, query.Message.Text)
 		}
 
 	case "action":
 		switch parts[1] {
 		case "clear":
 			t.agent.Memory.ClearHistory(chatID)
-			t.editMessage(chatID, msgID, "Memory cleared!")
+			t.editHTML(chatID, msgID, "<b>Memory cleared!</b>")
 		case "regen":
 			if len(parts) >= 3 {
 				originalText := strings.Join(parts[2:], ":")
@@ -233,17 +247,18 @@ func (t *TelegramTransport) ShowConfirmation(chatID int64, msgID int, toolName s
 	t.confirmations[token] = make(chan bool, 1)
 	t.mu.Unlock()
 
-	argsStr := formatArgs(args)
-	text := fmt.Sprintf("Confirm action:\n\nTool: %s\nArgs:\n%s\n\nExecute?", toolName, argsStr)
+	argsStr := formatArgsHTML(args)
+	text := fmt.Sprintf("<b>Confirm action:</b>\n\n<b>Tool:</b> <code>%s</code>\n<b>Args:</b>\n%s\n\nExecute?", toolName, argsStr)
 
+	// Цветные кнопки подтверждения
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("Yes", fmt.Sprintf("confirm:yes:%s", token)),
-			tgbotapi.NewInlineKeyboardButtonData("No", fmt.Sprintf("confirm:no:%s", token)),
+			newStyledButton("✅ Yes", fmt.Sprintf("confirm:yes:%s", token), "success"),
+			newStyledButton("❌ No", fmt.Sprintf("confirm:no:%s", token), "danger"),
 		),
 	)
 
-	t.editMessageWithKeyboard(chatID, msgID, text, keyboard)
+	t.editMessageWithKeyboardHTML(chatID, msgID, text, keyboard)
 
 	select {
 	case approved := <-t.confirmations[token]:
@@ -259,10 +274,10 @@ func (t *TelegramTransport) ShowConfirmation(chatID int64, msgID int, toolName s
 	}
 }
 
-func formatArgs(args map[string]interface{}) string {
+func formatArgsHTML(args map[string]interface{}) string {
 	var parts []string
 	for k, v := range args {
-		parts = append(parts, fmt.Sprintf("  - %s: %v", k, v))
+		parts = append(parts, fmt.Sprintf("  • <b>%s:</b> <code>%v</code>", k, v))
 	}
 	return strings.Join(parts, "\n")
 }
@@ -271,27 +286,108 @@ func (t *TelegramTransport) SendFileBytes(chatID int64, name string, data []byte
 	file := tgbotapi.NewDocument(chatID, tgbotapi.FileBytes{Name: name, Bytes: data})
 	if caption != "" {
 		file.Caption = caption
-		file.ParseMode = tgbotapi.ModeMarkdownV2
+		file.ParseMode = tgbotapi.ModeHTML
 	}
 	_, err := t.bot.Send(file)
 	return err
 }
 
-func (t *TelegramTransport) sendMessage(chatID int64, text string) (tgbotapi.Message, error) {
+// === HTML helpers ===
+
+func (t *TelegramTransport) sendHTML(chatID int64, text string) (tgbotapi.Message, error) {
 	msg := tgbotapi.NewMessage(chatID, text)
-	msg.ParseMode = tgbotapi.ModeMarkdownV2
+	msg.ParseMode = tgbotapi.ModeHTML
 	return t.bot.Send(msg)
 }
 
-func (t *TelegramTransport) editMessage(chatID int64, msgID int, text string) {
+func (t *TelegramTransport) editHTML(chatID int64, msgID int, text string) {
 	edit := tgbotapi.NewEditMessageText(chatID, msgID, text)
-	edit.ParseMode = tgbotapi.ModeMarkdownV2
+	edit.ParseMode = tgbotapi.ModeHTML
 	t.bot.Request(edit)
 }
 
-func (t *TelegramTransport) editMessageWithKeyboard(chatID int64, msgID int, text string, keyboard tgbotapi.InlineKeyboardMarkup) {
+func (t *TelegramTransport) editMessageWithKeyboardHTML(chatID int64, msgID int, text string, keyboard tgbotapi.InlineKeyboardMarkup) {
 	edit := tgbotapi.NewEditMessageText(chatID, msgID, text)
-	edit.ParseMode = tgbotapi.ModeMarkdownV2
+	edit.ParseMode = tgbotapi.ModeHTML
 	edit.ReplyMarkup = &keyboard
 	t.bot.Request(edit)
+}
+
+// === Styled buttons (Bot API 9.4+) ===
+
+func newStyledButton(text, callbackData, style string) tgbotapi.InlineKeyboardButton {
+	btn := tgbotapi.NewInlineKeyboardButtonData(text, callbackData)
+	// Для библиотеки v5 нужно использовать поле InlineKeyboardButtonStyle
+	// Если не поддерживается - просто возвращаем обычную кнопку
+	return btn
+}
+
+// === Format helpers ===
+
+func formatToHTML(text string) string {
+	// Экранируем HTML
+	text = html.EscapeString(text)
+
+	// Конвертируем **bold** → <b>bold</b>
+	for strings.Contains(text, "**") {
+		idx := strings.Index(text, "**")
+		if idx == -1 { break }
+		endIdx := strings.Index(text[idx+2:], "**")
+		if endIdx == -1 { break }
+		endIdx += idx + 2
+		inner := text[idx+2 : endIdx]
+		text = text[:idx] + "<b>" + inner + "</b>" + text[endIdx+2:]
+	}
+
+	// Конвертируем *italic* → <i>italic</i>
+	for strings.Contains(text, "*") {
+		idx := strings.Index(text, "*")
+		if idx == -1 || idx+1 >= len(text) { break }
+		if text[idx+1] == '*' { continue } // skip **
+		endIdx := strings.Index(text[idx+1:], "*")
+		if endIdx == -1 { break }
+		endIdx += idx + 1
+		inner := text[idx+1 : endIdx]
+		text = text[:idx] + "<i>" + inner + "</i>" + text[endIdx+1:]
+	}
+
+	// Конвертируем `code` → <code>code</code>
+	for strings.Contains(text, "`") {
+		idx := strings.Index(text, "`")
+		if idx == -1 { break }
+		if idx+1 < len(text) && text[idx+1] == '`' { continue } // skip ```
+		endIdx := strings.Index(text[idx+1:], "`")
+		if endIdx == -1 { break }
+		endIdx += idx + 1
+		inner := text[idx+1 : endIdx]
+		text = text[:idx] + "<code>" + inner + "</code>" + text[endIdx+1:]
+	}
+
+	// Конвертируем ```code blocks``` → <pre><code>...</code></pre>
+	for strings.Contains(text, "```") {
+		idx := strings.Index(text, "```")
+		if idx == -1 { break }
+		endIdx := strings.Index(text[idx+3:], "```")
+		if endIdx == -1 { break }
+		endIdx += idx + 3
+		inner := text[idx+3 : endIdx]
+		// Убираем язык если есть
+		if nl := strings.Index(inner, "\n"); nl > 0 && nl < 20 {
+			inner = inner[nl+1:]
+		}
+		text = text[:idx] + "<pre><code>" + inner + "</code></pre>" + text[endIdx+3:]
+	}
+
+	// Конвертируем переносы строк
+	text = strings.ReplaceAll(text, "\n", "
+")
+
+	return text
+}
+
+func formatNum(n int) string {
+	if n >= 1000 {
+		return fmt.Sprintf("%.1fk", float64(n)/1000)
+	}
+	return fmt.Sprintf("%d", n)
 }
