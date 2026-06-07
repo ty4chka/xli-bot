@@ -15,6 +15,8 @@ type Skill struct {
 type Registry interface {
 	LoadFromDir(dir string) error
 	FindMatching(query string) []Skill
+	FindRelevant(query string, topK int) []SkillMatch  // ← ДОБАВИТЬ
+	BuildPromptRelevant(query string, topK int) string   // ← ДОБАВИТЬ
 	Activate(name string) (*Skill, error)
 	GetAll() []Skill
 	GetActive() []Skill
