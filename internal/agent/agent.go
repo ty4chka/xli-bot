@@ -45,29 +45,54 @@ func NewAgent(llmClient llm.Client, store memory.Store, executor *ToolExecutor, 
 }
 
 func (a *Agent) SetOrchestrator(o *Orchestrator) {
-	Orchestrator = o
+	// ФИКС: было Orchestrator = o (тип, не поле)
+	a.Orchestrator = o  // ← правильно: поле структуры
 }
 
 func (a *Agent) Run(ctx context.Context, chatID int64, task string) (*AgentResult, error) {
-	log.Printf("[AGENT] Starting task: chat=%d, task=%q", chatID, task)
+	log.Printf("[AGENT] ════════════════════════════════════════")
+	log.Printf("[AGENT] 🚀 START task: chat=%d", chatID)
+	log.Printf("[AGENT] 📝 Task: %q", task)
+	log.Printf("[AGENT] ════════════════════════════════════════")
 
 	// Если есть оркестратор — используем его
 	if a.Orchestrator != nil {
-		log.Printf("[AGENT] Using orchestrator")
+		log.Printf("[AGENT] 🔀 Orchestrator ENABLED")
+
 		analysis, err := a.Orchestrator.AnalyzeTask(ctx, task)
 		if err == nil && analysis.Confidence > 60 {
-			log.Printf("[AGENT] Orchestrator selected: type=%s, confidence=%.0f", analysis.AgentType, analysis.Confidence)
+			log.Printf("[AGENT] ✅ Orchestrator DECISION:")
+			log.Printf("[AGENT]    Type: %s", analysis.AgentType)
+			log.Printf("[AGENT]    Confidence: %.0f%%", analysis.Confidence)
+			log.Printf("[AGENT]    Reasoning: %s", analysis.Reasoning)
+			log.Printf("[AGENT]    NeedsSkills: %v", analysis.NeedsSkills)
+			log.Printf("[AGENT]    NeedsTools: %v", analysis.NeedsTools)
+			log.Printf("[AGENT]    Complexity: %d/10", analysis.Complexity)
+
 			subAgent := a.Orchestrator.CreateSubAgent(analysis, a.Skills)
+			log.Printf("[AGENT] 🔀 Created SubAgent: %s (maxSteps=%d, tools=%d)",
+				subAgent.Name, subAgent.MaxSteps, len(subAgent.Tools))
+
 			result, err := subAgent.Run(ctx, chatID, task)
 			if err == nil {
 				result.AgentType = string(analysis.AgentType)
-				log.Printf("[AGENT] SubAgent done: type=%s, tokens=%d", result.AgentType, result.TotalTokens)
+				log.Printf("[AGENT] ✅ SubAgent SUCCESS:")
+				log.Printf("[AGENT]    Type: %s", result.AgentType)
+				log.Printf("[AGENT]    Tokens: in=%d out=%d total=%d",
+					result.InputTokens, result.OutputTokens, result.TotalTokens)
+				log.Printf("[AGENT]    Answer: %d chars", len(result.Answer))
+				log.Printf("[AGENT]    ThinkingNotes: %d", len(result.ThinkingNotes))
+				log.Printf("[AGENT]    AgentLog: %v", result.AgentLog)
+				log.Printf("[AGENT] ════════════════════════════════════════")
 				return result, nil
 			}
-			log.Printf("[AGENT] SubAgent failed: %v, falling back to main agent", err)
+			log.Printf("[AGENT] ❌ SubAgent FAILED: %v", err)
+			log.Printf("[AGENT] ↩️  FALLBACK to main agent")
 		} else {
-			log.Printf("[AGENT] Orchestrator fallback: err=%v, confidence=%.0f", err, analysis.Confidence)
+			log.Printf("[AGENT] ⚠️ Orchestrator fallback: err=%v confidence=%.0f", err, analysis.Confidence)
 		}
+	} else {
+		log.Printf("[AGENT] ℹ️ No orchestrator, using main agent")
 	}
 
 	// Fallback на основной агент
@@ -76,45 +101,51 @@ func (a *Agent) Run(ctx context.Context, chatID int64, task string) (*AgentResul
 
 	// 5 скиллов без обрезки
 	skillPrompt := a.Skills.BuildPromptRelevant(task, 5)
-	log.Printf("[AGENT] Skills loaded: %d chars", len(skillPrompt))
+	log.Printf("[AGENT] 📚 Skills loaded: %d chars", len(skillPrompt))
 
 	for step := 0; step < a.MaxSteps; step++ {
-		log.Printf("[AGENT] Step %d/%d", step+1, a.MaxSteps)
+		log.Printf("[AGENT] ───── Step %d/%d ─────", step+1, a.MaxSteps)
 
 		history, _ := a.Memory.LoadHistory(chatID, 50)
 		messages := a.buildMessages(history, task, skillPrompt)
-		log.Printf("[AGENT] Messages: %d, system=%d chars", len(messages), len(messages[0].Content))
+		log.Printf("[AGENT] 📨 Messages: %d (system=%d chars)", len(messages), len(messages[0].Content))
 
 		response, err := a.LLM.Complete(ctx, messages, &llm.CompletionOpts{
 			Model:       "mistral-large-latest",
 			Temperature: 0.7,
-			MaxTokens:   32000,  // ФИКС: 32K для длинных ответов
+			MaxTokens:   32000,
 		})
 		if err != nil {
-			log.Printf("[AGENT] LLM error: %v", err)
+			log.Printf("[AGENT] ❌ LLM ERROR: %v", err)
 			return nil, err
 		}
 
-		log.Printf("[AGENT] LLM response: tokens=%d in/%d out/%d total, content=%d chars",
-			response.InputTokens, response.OutputTokens, response.TotalTokens, len(response.Content))
+		log.Printf("[AGENT] 🤖 LLM Response:")
+		log.Printf("[AGENT]    Tokens: in=%d out=%d total=%d",
+			response.InputTokens, response.OutputTokens, response.TotalTokens)
+		log.Printf("[AGENT]    Content: %d chars", len(response.Content))
+		log.Printf("[AGENT]    Preview: %q", truncate(response.Content, 200))
 
 		result.InputTokens += response.InputTokens
 		result.OutputTokens += response.OutputTokens
 		result.TotalTokens += response.TotalTokens
 
 		calls := ParseToolCalls(response.Content)
-		log.Printf("[AGENT] Tool calls found: %d", len(calls))
+		log.Printf("[AGENT] 🔧 Tool calls found: %d", len(calls))
+		for i, call := range calls {
+			log.Printf("[AGENT]    [%d] %s args=%v", i, call.Tool, call.Args)
+		}
 
 		if len(calls) == 0 {
 			result.Answer = response.Content
-			log.Printf("[AGENT] No tool calls, final answer: %d chars", len(result.Answer))
+			log.Printf("[AGENT] ✅ No tool calls, FINAL ANSWER: %d chars", len(result.Answer))
 			break
 		}
 
 		a.Memory.SaveMessage(chatID, "assistant", response.Content)
 
 		for _, call := range calls {
-			log.Printf("[AGENT] Executing tool: %s", call.Tool)
+			log.Printf("[AGENT] ⚡ EXECUTING tool: %s", call.Tool)
 			result.AgentLog = append(result.AgentLog, fmt.Sprintf("Step %d: %s", step+1, call.Tool))
 
 			var output string
@@ -122,31 +153,33 @@ func (a *Agent) Run(ctx context.Context, chatID int64, task string) (*AgentResul
 
 			// Сначала пробуем MCP (ленивый auto-routing)
 			if a.MCP != nil {
+				log.Printf("[AGENT]    → Trying MCP...")
 				output, err = a.MCP.CallToolAuto(ctx, call.Tool, call.Args)
 				if err == nil {
-					log.Printf("[AGENT] MCP tool success: %s, output=%d chars", call.Tool, len(output))
+					log.Printf("[AGENT]    ✅ MCP SUCCESS: %d chars", len(output))
+					log.Printf("[AGENT]    Preview: %q", truncate(output, 150))
 					a.Memory.SaveMessage(chatID, "user", fmt.Sprintf("Tool <%s>:\n%s", call.Tool, output))
 					a.Memory.SaveToolMemory(chatID, call.Tool, output)
 					if call.Tool == "thinking.note" {
 						if note, ok := call.Args["note"].(string); ok {
 							result.ThinkingNotes = append(result.ThinkingNotes, note)
+							log.Printf("[AGENT]    💭 Thinking: %q", note)
 						}
 					}
 					continue
 				}
-				// Если не "Unknown tool" — логируем и пробуем built-in
-				if !strings.Contains(err.Error(), "Unknown") && !strings.Contains(err.Error(), "not found") {
-					log.Printf("[AGENT] MCP error: %v", err)
-				}
+				log.Printf("[AGENT]    ⚠️ MCP failed: %v", err)
 			}
 
 			// Built-in tools
+			log.Printf("[AGENT]    → Trying built-in...")
 			output, err = a.Executor.Execute(ctx, chatID, 0, call)
 			if err != nil {
-				log.Printf("[AGENT] Tool error: %s: %v", call.Tool, err)
+				log.Printf("[AGENT]    ❌ Built-in ERROR: %v", err)
 				output = fmt.Sprintf("Error: %v", err)
 			} else {
-				log.Printf("[AGENT] Tool output: %s: %d chars", call.Tool, len(output))
+				log.Printf("[AGENT]    ✅ Built-in SUCCESS: %d chars", len(output))
+				log.Printf("[AGENT]    Preview: %q", truncate(output, 150))
 			}
 
 			a.Memory.SaveMessage(chatID, "user", fmt.Sprintf("Tool <%s>:\n%s", call.Tool, output))
@@ -155,6 +188,7 @@ func (a *Agent) Run(ctx context.Context, chatID int64, task string) (*AgentResul
 			if call.Tool == "thinking.note" {
 				if note, ok := call.Args["note"].(string); ok {
 					result.ThinkingNotes = append(result.ThinkingNotes, note)
+					log.Printf("[AGENT]    💭 Thinking: %q", note)
 				}
 			}
 
@@ -162,7 +196,7 @@ func (a *Agent) Run(ctx context.Context, chatID int64, task string) (*AgentResul
 			if call.Tool == "file.write" {
 				path, _ := call.Args["path"].(string)
 				if strings.HasSuffix(path, ".go") {
-					log.Printf("[AGENT] Auto-compiling: %s", path)
+					log.Printf("[AGENT] 🔨 Auto-compiling: %s", path)
 					compileCall := ToolCall{
 						Tool: "terminal.run",
 						Args: map[string]interface{}{
@@ -174,10 +208,10 @@ func (a *Agent) Run(ctx context.Context, chatID int64, task string) (*AgentResul
 					}
 					compileOutput, compileErr := a.Executor.Execute(ctx, chatID, 0, compileCall)
 					if compileErr != nil {
-						log.Printf("[AGENT] Compile error: %v", compileErr)
+						log.Printf("[AGENT]    ❌ Compile error: %v", compileErr)
 						output += fmt.Sprintf("\n\nCompile error: %v", compileErr)
 					} else {
-						log.Printf("[AGENT] Compiled successfully: %d chars", len(compileOutput))
+						log.Printf("[AGENT]    ✅ Compiled: %d chars", len(compileOutput))
 						output += fmt.Sprintf("\n\nCompiled: %s", compileOutput)
 					}
 					a.Memory.SaveMessage(chatID, "user", fmt.Sprintf("Tool <terminal.run>:\n%s", output))
@@ -190,7 +224,15 @@ func (a *Agent) Run(ctx context.Context, chatID int64, task string) (*AgentResul
 		a.Memory.SaveMessage(chatID, "assistant", result.Answer)
 	}
 
-	log.Printf("[AGENT] Done: type=%s, tokens=%d, answer=%d chars", result.AgentType, result.TotalTokens, len(result.Answer))
+	log.Printf("[AGENT] ════════════════════════════════════════")
+	log.Printf("[AGENT] ✅ DONE:")
+	log.Printf("[AGENT]    Type: %s", result.AgentType)
+	log.Printf("[AGENT]    Tokens: in=%d out=%d total=%d",
+		result.InputTokens, result.OutputTokens, result.TotalTokens)
+	log.Printf("[AGENT]    Answer: %d chars", len(result.Answer))
+	log.Printf("[AGENT]    ThinkingNotes: %d", len(result.ThinkingNotes))
+	log.Printf("[AGENT]    AgentLog: %v", result.AgentLog)
+	log.Printf("[AGENT] ════════════════════════════════════════")
 	return result, nil
 }
 
@@ -198,7 +240,6 @@ func (a *Agent) buildMessages(history []memory.Message, task, skillPrompt string
 	var messages []llm.Message
 
 	var sb strings.Builder
-	// ФИКС: краткий системный промпт
 	sb.WriteString("You are XLI-Go Bot, an AI assistant.\n\n")
 	sb.WriteString("CRITICAL RULES:\n")
 	sb.WriteString("1. Be CONCISE. 2-3 sentences max unless asked for details.\n")
@@ -300,4 +341,12 @@ func (a *Agent) SimpleAsk(ctx context.Context, task string) (*AgentResult, error
 		TotalTokens:  response.TotalTokens,
 		AgentType:    "general",
 	}, nil
+}
+
+// truncate — хелпер для логов
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }
