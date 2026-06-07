@@ -44,7 +44,7 @@ func NewTelegram(token string, a *agent.Agent) (*TelegramTransport, error) {
 }
 
 func (t *TelegramTransport) SetAgent(a *agent.Agent) {
-	t.agent = a
+	agent = a
 }
 
 func (t *TelegramTransport) Start() {
@@ -102,10 +102,12 @@ func (t *TelegramTransport) handleCommand(msg *tgbotapi.Message) {
 		t.sendHTML(chatID, "Bot running\nSQLite connected")
 
 	case "skills":
-		t.handleSkillsCommand(chatID, 0)
+		// Отправляем новое сообщение с клавиатурой
+		t.handleSkillsCommand(chatID, 0, 0)
 
 	case "mcp":
-		t.handleMCPCommand(chatID, 0)
+		// Отправляем новое сообщение с клавиатурой
+		t.handleMCPCommand(chatID, 0, 0)
 
 	case "oa":
 		query := msg.CommandArguments()
@@ -120,7 +122,8 @@ func (t *TelegramTransport) handleCommand(msg *tgbotapi.Message) {
 	}
 }
 
-func (t *TelegramTransport) handleSkillsCommand(chatID int64, page int) {
+// handleSkillsCommand — msgID=0 для нового сообщения, msgID>0 для редактирования
+func (t *TelegramTransport) handleSkillsCommand(chatID int64, page int, msgID int) {
 	all := t.agent.Skills.GetAll()
 	active := t.agent.Skills.GetActive()
 	activeMap := make(map[string]bool)
@@ -164,56 +167,36 @@ func (t *TelegramTransport) handleSkillsCommand(chatID int64, page int) {
 		rows = append(rows, currentRow)
 	}
 
-	var keyboard tgbotapi.InlineKeyboardMarkup
-	if len(rows) > 0 {
-		keyboard = tgbotapi.NewInlineKeyboardMarkup(rows...)
-		t.sendMessageWithKeyboardHTML(chatID, sb.String(), keyboard)
+	if msgID == 0 {
+		// Новое сообщение
+		if len(rows) > 0 {
+			keyboard := tgbotapi.NewInlineKeyboardMarkup(rows...)
+			t.sendMessageWithKeyboardHTML(chatID, sb.String(), keyboard)
+		} else {
+			t.sendHTML(chatID, sb.String())
+		}
 	} else {
-		t.sendHTML(chatID, sb.String())
+		// Редактирование существующего
+		edit := tgbotapi.NewEditMessageText(chatID, msgID, sb.String())
+		edit.ParseMode = tgbotapi.ModeHTML
+		if len(rows) > 0 {
+			keyboard := tgbotapi.NewInlineKeyboardMarkup(rows...)
+			edit.ReplyMarkup = &keyboard
+		}
+		t.bot.Request(edit)
 	}
 }
 
-func (t *TelegramTransport) handleMCPCommand(chatID int64, page int) {
-	tools := t.agent.MCP.ListAllTools()
-	perPage := 5
-	total := len(tools)
-	start := page * perPage
-	end := start + perPage
-	if end > total {
-		end = total
-	}
+// handleMCPCommand — msgID=0 для нового сообщения, msgID>0 для редактирования
+func (t *TelegramTransport) handleMCPCommand(chatID int64, page int, msgID int) {
+	status := t.agent.MCP.Status()
 
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("<b>MCP tools:</b> <code>%d total</code>\n\n", total))
-
-	if total == 0 {
-		sb.WriteString("<i>No servers connected</i>")
+	if msgID == 0 {
+		t.sendHTML(chatID, status)
 	} else {
-		for i := start; i < end; i++ {
-			tool := tools[i]
-			sb.WriteString(fmt.Sprintf("• <code>%s</code> — <i>%s</i>\n", tool.Name, tool.Description))
-		}
-	}
-
-	var rows [][]tgbotapi.InlineKeyboardButton
-	var currentRow []tgbotapi.InlineKeyboardButton
-
-	if page > 0 {
-		currentRow = append(currentRow, tgbotapi.NewInlineKeyboardButtonData("◀ Prev", fmt.Sprintf("page:mcp:%d", page-1)))
-	}
-	if end < total {
-		currentRow = append(currentRow, tgbotapi.NewInlineKeyboardButtonData("Next ▶", fmt.Sprintf("page:mcp:%d", page+1)))
-	}
-	if len(currentRow) > 0 {
-		rows = append(rows, currentRow)
-	}
-
-	var keyboard tgbotapi.InlineKeyboardMarkup
-	if len(rows) > 0 {
-		keyboard = tgbotapi.NewInlineKeyboardMarkup(rows...)
-		t.sendMessageWithKeyboardHTML(chatID, sb.String(), keyboard)
-	} else {
-		t.sendHTML(chatID, sb.String())
+		edit := tgbotapi.NewEditMessageText(chatID, msgID, status)
+		edit.ParseMode = tgbotapi.ModeHTML
+		t.bot.Request(edit)
 	}
 }
 
@@ -384,9 +367,11 @@ func (t *TelegramTransport) handleCallback(query *tgbotapi.CallbackQuery) {
 			page, _ := strconv.Atoi(parts[2])
 			switch parts[1] {
 			case "skills":
-				t.handleSkillsCommand(chatID, page)
+				// РЕДАКТИРУЕМ существующее сообщение!
+				t.handleSkillsCommand(chatID, page, msgID)
 			case "mcp":
-				t.handleMCPCommand(chatID, page)
+				// РЕДАКТИРУЕМ существующее сообщение!
+				t.handleMCPCommand(chatID, page, msgID)
 			}
 		}
 
@@ -505,9 +490,38 @@ func (t *TelegramTransport) editMessageWithKeyboardHTML(chatID int64, msgID int,
 	t.bot.Request(edit)
 }
 
+// formatToHTML — конвертирует markdown в HTML + blockquote
 func formatToHTML(text string) string {
-	text = html.EscapeString(text)
+	// Сначала обрабатываем blockquote (> текст)
+	lines := strings.Split(text, "\n")
+	var result []string
+	inQuote := false
 
+	for _, line := range lines {
+		trimmed := strings.TrimLeft(line, " ")
+		if strings.HasPrefix(trimmed, "> ") || strings.HasPrefix(trimmed, ">>") {
+			if !inQuote {
+				result = append(result, "<blockquote>")
+				inQuote = true
+			}
+			quoteText := strings.TrimPrefix(trimmed, "> ")
+			quoteText = strings.TrimPrefix(quoteText, ">>")
+			result = append(result, html.EscapeString(quoteText))
+		} else {
+			if inQuote {
+				result = append(result, "</blockquote>")
+				inQuote = false
+			}
+			result = append(result, html.EscapeString(line))
+		}
+	}
+	if inQuote {
+		result = append(result, "</blockquote>")
+	}
+
+	text = strings.Join(result, "\n")
+
+	// Bold **text**
 	for strings.Contains(text, "**") {
 		idx := strings.Index(text, "**")
 		if idx == -1 {
@@ -522,6 +536,7 @@ func formatToHTML(text string) string {
 		text = text[:idx] + "<b>" + inner + "</b>" + text[endIdx+2:]
 	}
 
+	// Italic *text*
 	for strings.Contains(text, "*") {
 		idx := strings.Index(text, "*")
 		if idx == -1 || idx+1 >= len(text) {
@@ -539,6 +554,7 @@ func formatToHTML(text string) string {
 		text = text[:idx] + "<i>" + inner + "</i>" + text[endIdx+1:]
 	}
 
+	// Code `text`
 	for strings.Contains(text, "`") {
 		idx := strings.Index(text, "`")
 		if idx == -1 {
@@ -556,6 +572,7 @@ func formatToHTML(text string) string {
 		text = text[:idx] + "<code>" + inner + "</code>" + text[endIdx+1:]
 	}
 
+	// Code blocks ```text```
 	for strings.Contains(text, "```") {
 		idx := strings.Index(text, "```")
 		if idx == -1 {
