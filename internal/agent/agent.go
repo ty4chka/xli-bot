@@ -120,12 +120,28 @@ func (a *Agent) Run(ctx context.Context, chatID int64, task string) (*AgentResul
 			var output string
 			var err error
 
-			if a.isMCPTool(call.Tool) {
-				output, err = a.executeMCPTool(ctx, call)
-			} else {
-				output, err = a.Executor.Execute(ctx, chatID, 0, call)
+			// Сначала пробуем MCP (ленивый auto-routing)
+			if a.MCP != nil {
+				output, err = a.MCP.CallToolAuto(ctx, call.Tool, call.Args)
+				if err == nil {
+					log.Printf("[AGENT] MCP tool success: %s, output=%d chars", call.Tool, len(output))
+					a.Memory.SaveMessage(chatID, "user", fmt.Sprintf("Tool <%s>:\n%s", call.Tool, output))
+					a.Memory.SaveToolMemory(chatID, call.Tool, output)
+					if call.Tool == "thinking.note" {
+						if note, ok := call.Args["note"].(string); ok {
+							result.ThinkingNotes = append(result.ThinkingNotes, note)
+						}
+					}
+					continue
+				}
+				// Если не "Unknown tool" — логируем и пробуем built-in
+				if !strings.Contains(err.Error(), "Unknown") && !strings.Contains(err.Error(), "not found") {
+					log.Printf("[AGENT] MCP error: %v", err)
+				}
 			}
 
+			// Built-in tools
+			output, err = a.Executor.Execute(ctx, chatID, 0, call)
 			if err != nil {
 				log.Printf("[AGENT] Tool error: %s: %v", call.Tool, err)
 				output = fmt.Sprintf("Error: %v", err)
@@ -178,37 +194,13 @@ func (a *Agent) Run(ctx context.Context, chatID int64, task string) (*AgentResul
 	return result, nil
 }
 
-func (a *Agent) isMCPTool(toolName string) bool {
-	tools := a.MCP.ListAllTools()
-	for _, t := range tools {
-		if t.Name == toolName {
-			return true
-		}
-	}
-	return false
-}
-
-func (a *Agent) executeMCPTool(ctx context.Context, call ToolCall) (string, error) {
-	tools := a.MCP.ListAllTools()
-	var serverName string
-	for _, t := range tools {
-		if t.Name == call.Tool {
-			serverName = t.Server
-			break
-		}
-	}
-	if serverName == "" {
-		return "", fmt.Errorf("MCP tool not found: %s", call.Tool)
-	}
-	return a.MCP.CallTool(ctx, serverName, call.Tool, call.Args)
-}
-
 func (a *Agent) buildMessages(history []memory.Message, task, skillPrompt string) []llm.Message {
 	var messages []llm.Message
 
 	var sb strings.Builder
 	sb.WriteString("You are XLI-Go Bot, an AI assistant with tool calling capabilities.\n\n")
-	sb.WriteString("Available built-in tools:\n")
+
+	sb.WriteString("Built-in tools:\n")
 	sb.WriteString("```tool_call\n")
 	sb.WriteString(`{"tool":"thinking.note","args":{"note":"your thought"}}`)
 	sb.WriteString("\n```\n")
@@ -226,20 +218,36 @@ func (a *Agent) buildMessages(history []memory.Message, task, skillPrompt string
 	sb.WriteString("\n```\n")
 	sb.WriteString("```tool_call\n")
 	sb.WriteString(`{"tool":"web.fetch","args":{"url":"https://..."}}`)
-	sb.WriteString("\n```\n\n")
+	sb.WriteString("\n```\n")
+	sb.WriteString("```tool_call\n")
+	sb.WriteString(`{"tool":"github.build","args":{"lang":"go","path":"/path/to/file.go"}}`)
+	sb.WriteString("\n```\n")
+	sb.WriteString("```tool_call\n")
+	sb.WriteString(`{"tool":"sandbox.run","args":{"path":"/path/to/binary"}}`)
+	sb.WriteString("\n```\n")
 
-	sb.WriteString("Available MCP tools:\n")
-	mcpTools := a.MCP.ListAllTools()
-	for _, tool := range mcpTools {
-		sb.WriteString(fmt.Sprintf("- %s: %s\n", tool.Name, tool.Description))
-	}
+	sb.WriteString("\nMCP tools (lazy loaded, auto-routed — use same format):\n")
+	sb.WriteString("- search_code: Search code in knowledge base\n")
+	sb.WriteString("- analyze_traceback: Debug errors\n")
+	sb.WriteString("- run_tests, fix_test: Auto test code\n")
+	sb.WriteString("- suggest_command, fix_typo, generate_complex_command: Shell helper\n")
+	sb.WriteString("- list_dependencies, check_vulnerabilities, update_dependencies: Package monitor\n")
+	sb.WriteString("- prompt_create, prompt_get, prompt_list, prompt_evaluate: Prompt management\n")
+	sb.WriteString("- blame_line, code_ownership, commit_history, temporal_coupling: Git analysis\n")
+	sb.WriteString("- analyze_complexity, detect_long_methods: Code complexity\n")
+	sb.WriteString("- dependency_graph, circular_dependencies, suggest_modules: Architecture\n")
+	sb.WriteString("- discover_tests: Test discovery\n")
 
-	sb.WriteString("\nRules:\n")
+	sb.WriteString("\nCRITICAL RULES:\n")
 	sb.WriteString("1. Use thinking.note to plan\n")
 	sb.WriteString("2. Use web.search for current info\n")
 	sb.WriteString("3. Respond normally when no tools needed\n")
-	sb.WriteString("4. Always use tool_call format\n")
+	sb.WriteString("4. ALWAYS use ```tool_call format\n")
 	sb.WriteString("5. After writing .go file, COMPILE it with terminal.run go build\n")
+	sb.WriteString("6. For Python scripts, use terminal.run python3 or sandbox.run\n")
+	sb.WriteString("7. MCP tools are called SAME WAY as built-in tools\n")
+	sb.WriteString("8. You can use MULTIPLE tools in sequence\n")
+	sb.WriteString("9. ALWAYS use file.write for code, NEVER put code in response text\n")
 
 	if skillPrompt != "" {
 		sb.WriteString("\n")
