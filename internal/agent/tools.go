@@ -106,9 +106,15 @@ func (te *ToolExecutor) fileWrite(ctx context.Context, chatID int64, msgID int, 
 		return "", err
 	}
 
-	te.transport.SendFileBytes(chatID, filepath.Base(path), []byte(content), "File created")
+	// FIX: Отправляем файл с проверкой ошибки и правильным именем
+	fileName := filepath.Base(path)
+	data := []byte(content)
+	if err := te.transport.SendFileBytes(chatID, fileName, data,
+		fmt.Sprintf("File: <code>%s</code> (%d bytes)", fileName, len(data))); err != nil {
+		return fmt.Sprintf("Written: %s (%d bytes) [send error: %v]", path, len(data), err), nil
+	}
 
-	return fmt.Sprintf("Written: %s (%d bytes)", path, len(content)), nil
+	return fmt.Sprintf("Written: %s (%d bytes)", path, len(data)), nil
 }
 
 func (te *ToolExecutor) webSearch(ctx context.Context, args map[string]interface{}) (string, error) {
