@@ -1,8 +1,11 @@
 package agent
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -51,6 +54,8 @@ func (te *ToolExecutor) Execute(ctx context.Context, chatID int64, msgID int, ca
 		return te.githubBuild(ctx, chatID, msgID, call.Args)
 	case "sandbox.run":
 		return te.sandboxRun(ctx, chatID, msgID, call.Args)
+	case "archive.create":
+		return te.archiveCreate(ctx, chatID, msgID, call.Args)
 	default:
 		return "", fmt.Errorf("unknown tool: %s", call.Tool)
 	}
@@ -194,6 +199,83 @@ func (te *ToolExecutor) fileWrite(ctx context.Context, chatID int64, msgID int, 
 	}
 
 	return fmt.Sprintf("✅ Written: %s (%d bytes)", path, len(data)), nil
+}
+
+// archive.create — НОВЫЙ ТУЛ: создаёт ZIP архив
+func (te *ToolExecutor) archiveCreate(ctx context.Context, chatID int64, msgID int, args map[string]interface{}) (string, error) {
+	sourcePath, _ := args["source"].(string)
+	archiveName, _ := args["name"].(string)
+
+	if sourcePath == "" {
+		return "", fmt.Errorf("source path required")
+	}
+	if archiveName == "" {
+		archiveName = "archive.zip"
+	}
+	if !strings.HasSuffix(archiveName, ".zip") {
+		archiveName += ".zip"
+	}
+
+	log.Printf("[TOOL] archive.create: %s → %s", sourcePath, archiveName)
+
+	// Проверяем существование
+	if _, err := os.Stat(sourcePath); os.IsNotExist(err) {
+		return "", fmt.Errorf("source not found: %s", sourcePath)
+	}
+
+	// Создаём ZIP в памяти
+	var buf bytes.Buffer
+	zipWriter := zip.NewWriter(&buf)
+
+	// Обходим директорию
+	err := filepath.Walk(sourcePath, func(filePath string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+
+		// Относительный путь внутри архива
+		relPath, err := filepath.Rel(sourcePath, filePath)
+		if err != nil {
+			return err
+		}
+
+		// Заменяем сепараторы для кросс-платформенности
+		relPath = filepath.ToSlash(relPath)
+
+		writer, err := zipWriter.Create(relPath)
+		if err != nil {
+			return err
+		}
+
+		file, err := os.Open(filePath)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+
+		_, err = io.Copy(writer, file)
+		return err
+	})
+
+	if err != nil {
+		return "", fmt.Errorf("zip creation failed: %w", err)
+	}
+
+	if err := zipWriter.Close(); err != nil {
+		return "", fmt.Errorf("zip close failed: %w", err)
+	}
+
+	zipData := buf.Bytes()
+	log.Printf("[TOOL] archive.create success: %d bytes", len(zipData))
+
+	// Отправляем архив
+	te.transport.SendFileBytes(chatID, archiveName, zipData,
+		fmt.Sprintf("📦 <b>Archive</b>: <code>%s</code> (%d bytes)", archiveName, len(zipData)))
+
+	return fmt.Sprintf("✅ Archive created: %s (%d bytes)", archiveName, len(zipData)), nil
 }
 
 func (te *ToolExecutor) webSearch(ctx context.Context, args map[string]interface{}) (string, error) {
