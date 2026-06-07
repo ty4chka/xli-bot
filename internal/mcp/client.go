@@ -23,7 +23,6 @@ type ServerConn struct {
 	Command     []string
 	Enabled     bool
 	IsNPX       bool
-	tools       []Tool
 	process     *exec.Cmd
 	stdin       io.WriteCloser
 	stdout      *bufio.Reader
@@ -31,12 +30,6 @@ type ServerConn struct {
 	connected   bool
 	lastUsed    time.Time
 	idleTimeout time.Duration
-}
-
-type Tool struct {
-	Name        string
-	Description string
-	Server      string
 }
 
 type MCPServer struct {
@@ -73,13 +66,14 @@ func (c *Client) Register(server MCPServer) error {
 	return nil
 }
 
-func (c *Client) Connect(serverName string) error {
+// Ленивое подключение — без initialize, сразу готов к tools/call
+func (c *Client) ensureConnected(serverName string) (*ServerConn, error) {
 	c.mu.RLock()
 	conn, ok := c.servers[serverName]
 	c.mu.RUnlock()
 
 	if !ok {
-		return fmt.Errorf("server not found: %s", serverName)
+		return nil, fmt.Errorf("server not found: %s", serverName)
 	}
 
 	conn.mu.Lock()
@@ -87,7 +81,7 @@ func (c *Client) Connect(serverName string) error {
 
 	if conn.connected {
 		conn.lastUsed = time.Now()
-		return nil
+		return conn, nil
 	}
 
 	var cmd *exec.Cmd
@@ -99,18 +93,18 @@ func (c *Client) Connect(serverName string) error {
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Start(); err != nil {
-		return err
+		return nil, err
 	}
 
 	conn.process = cmd
@@ -119,85 +113,15 @@ func (c *Client) Connect(serverName string) error {
 	conn.connected = true
 	conn.lastUsed = time.Now()
 
-	if err := c.initialize(conn); err != nil {
-		conn.process.Process.Kill()
-		conn.connected = false
-		return err
-	}
-
-	tools, err := c.listTools(conn)
-	if err != nil {
-		return err
-	}
-	conn.tools = tools
-
-	fmt.Printf("✅ MCP connected: %s (%d tools)\n", serverName, len(tools))
-	return nil
+	fmt.Printf("✅ MCP connected (lazy): %s\n", serverName)
+	return conn, nil
 }
 
-func (c *Client) initialize(conn *ServerConn) error {
-	req := map[string]interface{}{
-		"jsonrpc": "2.0",
-		"id":      1,
-		"method":  "initialize",
-		"params": map[string]interface{}{
-			"protocolVersion": "2024-11-05",
-			"capabilities":    map[string]interface{}{},
-			"clientInfo": map[string]string{
-				"name":    "xli-bot",
-				"version": "1.0.0",
-			},
-		},
-	}
-	return c.sendRequest(conn, req)
-}
-
-func (c *Client) listTools(conn *ServerConn) ([]Tool, error) {
-	req := map[string]interface{}{
-		"jsonrpc": "2.0",
-		"id":      2,
-		"method":  "tools/list",
-	}
-
-	if err := c.sendRequest(conn, req); err != nil {
-		return nil, err
-	}
-
-	resp, err := c.readResponse(conn)
-	if err != nil {
-		return nil, err
-	}
-
-	var tools []Tool
-	if result, ok := resp["result"].(map[string]interface{}); ok {
-		if toolsArr, ok := result["tools"].([]interface{}); ok {
-			for _, t := range toolsArr {
-				if toolMap, ok := t.(map[string]interface{}); ok {
-					tool := Tool{
-						Name:        getString(toolMap, "name"),
-						Description: getString(toolMap, "description"),
-						Server:      conn.Name,
-					}
-					tools = append(tools, tool)
-				}
-			}
-		}
-	}
-
-	return tools, nil
-}
-
+// CallTool — ленивый вызов, без initialize
 func (c *Client) CallTool(ctx context.Context, serverName, toolName string, args map[string]interface{}) (string, error) {
-	if err := c.Connect(serverName); err != nil {
+	conn, err := c.ensureConnected(serverName)
+	if err != nil {
 		return "", err
-	}
-
-	c.mu.RLock()
-	conn, ok := c.servers[serverName]
-	c.mu.RUnlock()
-
-	if !ok || !conn.connected {
-		return "", fmt.Errorf("server not connected: %s", serverName)
 	}
 
 	conn.mu.Lock()
@@ -220,15 +144,14 @@ func (c *Client) CallTool(ctx context.Context, serverName, toolName string, args
 
 	resp, err := c.readResponse(conn)
 	if err != nil {
+		// Пробуем реконнект один раз
 		conn.connected = false
-		if reconnectErr := c.Connect(serverName); reconnectErr == nil {
-			c.mu.RLock()
-			conn, _ = c.servers[serverName]
-			c.mu.RUnlock()
-			conn.mu.Lock()
-			c.sendRequest(conn, req)
-			resp, err = c.readResponse(conn)
-			conn.mu.Unlock()
+		if newConn, reconnectErr := c.ensureConnected(serverName); reconnectErr == nil {
+			newConn.mu.Lock()
+			c.sendRequest(newConn, req)
+			resp, err = c.readResponse(newConn)
+			newConn.mu.Unlock()
+			conn = newConn
 		}
 		if err != nil {
 			return "", err
@@ -250,37 +173,35 @@ func (c *Client) CallTool(ctx context.Context, serverName, toolName string, args
 	return "", fmt.Errorf("empty response")
 }
 
-func (c *Client) ListTools(serverName string) ([]Tool, error) {
-	if err := c.Connect(serverName); err != nil {
-		return nil, err
-	}
-
+// CallToolAuto — автоматически выбирает сервер по имени тулзы
+func (c *Client) CallToolAuto(ctx context.Context, toolName string, args map[string]interface{}) (string, error) {
+	// Ищем сервер, у которого есть этот тул
 	c.mu.RLock()
-	conn, ok := c.servers[serverName]
+	for name, conn := range c.servers {
+		if !conn.Enabled {
+			continue
+		}
+		// Проверяем, есть ли тул у этого сервера
+		// Для ленивого режима — пробуем вызвать, если ошибка "Unknown tool" — пробуем следующий
+		c.mu.RUnlock()
+		result, err := c.CallTool(ctx, name, toolName, args)
+		if err == nil {
+			return result, nil
+		}
+		if err != nil && !strings.Contains(err.Error(), "Unknown") {
+			return "", err
+		}
+		c.mu.RLock()
+	}
 	c.mu.RUnlock()
 
-	if !ok {
-		return nil, fmt.Errorf("server not found")
-	}
-
-	conn.mu.Lock()
-	defer conn.mu.Unlock()
-	return conn.tools, nil
+	return "", fmt.Errorf("tool not found in any MCP server: %s", toolName)
 }
 
 func (c *Client) ListAllTools() []Tool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	var all []Tool
-	for _, conn := range c.servers {
-		if conn.connected {
-			conn.mu.Lock()
-			all = append(all, conn.tools...)
-			conn.mu.Unlock()
-		}
-	}
-	return all
+	// Для ленивого режима — возвращаем пустой список или хардкоженый
+	// Агенты будут пробовать вызывать тулзы напрямую
+	return []Tool{}
 }
 
 func (c *Client) Disconnect(serverName string) error {
@@ -346,23 +267,6 @@ func (c *Client) CleanupIdle() {
 			conn.connected = false
 		}
 		conn.mu.Unlock()
-	}
-}
-
-func (c *Client) AutoReconnect() {
-	c.mu.RLock()
-	names := make([]string, 0, len(c.servers))
-	for name, conn := range c.servers {
-		if conn.Enabled && !conn.connected {
-			names = append(names, name)
-		}
-	}
-	c.mu.RUnlock()
-
-	for _, name := range names {
-		if err := c.Connect(name); err != nil {
-			fmt.Printf("❌ Auto-reconnect failed %s: %v\n", name, err)
-		}
 	}
 }
 
