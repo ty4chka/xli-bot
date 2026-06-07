@@ -221,8 +221,7 @@ func (h *HotLoader) handleFileChange(path, action string) {
 	}
 
 	h.skills[skill.Name] = skill
-	fmt.Printf("Skill %s: %s
-", action, skill.Name)
+	fmt.Printf("Skill %s: %s\n", action, skill.Name)
 }
 
 func (h *HotLoader) handleFileRemove(path string) {
@@ -233,8 +232,7 @@ func (h *HotLoader) handleFileRemove(path string) {
 		if skill.Source == path {
 			delete(h.skills, name)
 			delete(h.active, name)
-			fmt.Printf("Skill removed: %s
-", name)
+			fmt.Printf("Skill removed: %s\n", name)
 			return
 		}
 	}
@@ -307,14 +305,11 @@ func (h *HotLoader) BuildPrompt(query string) string {
 	defer h.mu.RUnlock()
 
 	var parts []string
-	parts = append(parts, "You are XLI-Go Bot with the following skills activated:
-")
+	parts = append(parts, "You are XLI-Go Bot with the following skills activated:\n")
 
 	for name := range h.active {
 		if skill, ok := h.skills[name]; ok {
-			parts = append(parts, fmt.Sprintf("=== %s ===
-%s
-", skill.Name, skill.Content))
+			parts = append(parts, fmt.Sprintf("=== %s ===\n%s\n", skill.Name, skill.Content))
 		}
 	}
 
@@ -325,16 +320,13 @@ func (h *HotLoader) BuildPrompt(query string) string {
 		}
 		for _, kw := range skill.Keywords {
 			if strings.Contains(queryLower, strings.ToLower(kw)) {
-				parts = append(parts, fmt.Sprintf("=== %s (auto-triggered) ===
-%s
-", skill.Name, skill.Content))
+				parts = append(parts, fmt.Sprintf("=== %s (auto-triggered) ===\n%s\n", skill.Name, skill.Content))
 				break
 			}
 		}
 	}
 
-	return strings.Join(parts, "
-")
+	return strings.Join(parts, "\n")
 }
 
 func (h *HotLoader) Reload() error {
