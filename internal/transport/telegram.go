@@ -15,11 +15,18 @@ import (
 	"github.com/oblachko/xli-bot/internal/agent"
 )
 
+const (
+	MaxMessageLength = 4000
+	PageSize         = 3500
+)
+
 type TelegramTransport struct {
 	bot           *tgbotapi.BotAPI
 	agent         *agent.Agent
 	confirmations map[string]chan bool
 	mu            sync.RWMutex
+	bookPages     map[string][]string
+	bookMu        sync.RWMutex
 }
 
 func NewTelegram(token string, a *agent.Agent) (*TelegramTransport, error) {
@@ -32,6 +39,7 @@ func NewTelegram(token string, a *agent.Agent) (*TelegramTransport, error) {
 		bot:           bot,
 		agent:         a,
 		confirmations: make(map[string]chan bool),
+		bookPages:     make(map[string][]string),
 	}, nil
 }
 
@@ -140,7 +148,7 @@ func (t *TelegramTransport) handleSkillsCommand(chatID int64, page int) {
 		if s.TriggerMode == "always" {
 			status = "★"
 		}
-		sb.WriteString(fmt.Sprintf("%s <code>%s</code> — <i>%s</i>\n", status, s.Name, s.Description))
+		sb.WriteString(fmt.Sprintf("%s <code>%s</code> — <i>%s</i>\n", status, s.Name, s.TriggerMode))
 	}
 
 	var rows [][]tgbotapi.InlineKeyboardButton
@@ -231,27 +239,105 @@ func (t *TelegramTransport) processAgentRequest(chatID int64, text string) {
 	log.Printf("[TG] Agent result: type=%s, tokens=%d, answer=%d chars", result.AgentType, result.TotalTokens, len(result.Answer))
 
 	response := formatToHTML(result.Answer)
-
-	if len(response) > 500 {
-		response = "<blockquote expandable>\n" + response + "\n</blockquote>"
-	}
-
 	tokenInfo := fmt.Sprintf("<i>Tokens: in %s out %s total %s</i>",
 		formatNum(result.InputTokens),
 		formatNum(result.OutputTokens),
 		formatNum(result.TotalTokens))
 
-	finalText := response + "\n\n" + tokenInfo
+	fullText := response + "\n\n" + tokenInfo
 
-	keyboard := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("Clear", fmt.Sprintf("action:clear:%d", chatID)),
-			tgbotapi.NewInlineKeyboardButtonData("Regen", fmt.Sprintf("action:regen:%s", text)),
-		),
-	)
+	if len(fullText) <= MaxMessageLength {
+		keyboard := tgbotapi.NewInlineKeyboardMarkup(
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("Clear", fmt.Sprintf("action:clear:%d", chatID)),
+				tgbotapi.NewInlineKeyboardButtonData("Regen", fmt.Sprintf("action:regen:%s", text)),
+			),
+		)
+		t.editMessageWithKeyboardHTML(chatID, thinkMsg.MessageID, fullText, keyboard)
+		log.Printf("[TG] Short answer edited, done")
+		return
+	}
 
-	t.editMessageWithKeyboardHTML(chatID, thinkMsg.MessageID, finalText, keyboard)
-	log.Printf("[TG] Final message edited, done")
+	pages := t.splitIntoPages(response, PageSize)
+	totalPages := len(pages)
+	log.Printf("[TG] Book mode: %d pages", totalPages)
+
+	bookKey := fmt.Sprintf("%d_%d", chatID, thinkMsg.MessageID)
+	t.bookMu.Lock()
+	t.bookPages[bookKey] = pages
+	t.bookMu.Unlock()
+
+	firstPage := pages[0] + fmt.Sprintf("\n\n📄 <i>Page 1/%d</i>\n%s", totalPages, tokenInfo)
+	keyboard := t.buildBookKeyboard(bookKey, 0, totalPages, chatID, text)
+	t.editMessageWithKeyboardHTML(chatID, thinkMsg.MessageID, firstPage, keyboard)
+	log.Printf("[TG] Book page 1/%d shown", totalPages)
+}
+
+func (t *TelegramTransport) buildBookKeyboard(bookKey string, currentPage, totalPages int, chatID int64, originalText string) tgbotapi.InlineKeyboardMarkup {
+	var rows [][]tgbotapi.InlineKeyboardButton
+
+	var navRow []tgbotapi.InlineKeyboardButton
+	if currentPage > 0 {
+		navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData("◀ Prev", fmt.Sprintf("book:%s:%d", bookKey, currentPage-1)))
+	}
+	navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("%d/%d", currentPage+1, totalPages), "noop"))
+	if currentPage < totalPages-1 {
+		navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData("Next ▶", fmt.Sprintf("book:%s:%d", bookKey, currentPage+1)))
+	}
+	if len(navRow) > 0 {
+		rows = append(rows, navRow)
+	}
+
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("Clear", fmt.Sprintf("action:clear:%d", chatID)),
+		tgbotapi.NewInlineKeyboardButtonData("Regen", fmt.Sprintf("action:regen:%s", originalText)),
+	))
+
+	return tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
+func (t *TelegramTransport) splitIntoPages(text string, maxLen int) []string {
+	var pages []string
+	var currentPage strings.Builder
+
+	paragraphs := strings.Split(text, "\n\n")
+
+	for _, para := range paragraphs {
+		if len(para) > maxLen {
+			lines := strings.Split(para, "\n")
+			for _, line := range lines {
+				if currentPage.Len()+len(line)+1 > maxLen {
+					if currentPage.Len() > 0 {
+						pages = append(pages, currentPage.String())
+						currentPage.Reset()
+					}
+				}
+				if currentPage.Len() > 0 {
+					currentPage.WriteString("\n")
+				}
+				currentPage.WriteString(line)
+			}
+			continue
+		}
+
+		if currentPage.Len()+len(para)+2 > maxLen {
+			if currentPage.Len() > 0 {
+				pages = append(pages, currentPage.String())
+				currentPage.Reset()
+			}
+		}
+
+		if currentPage.Len() > 0 {
+			currentPage.WriteString("\n\n")
+		}
+		currentPage.WriteString(para)
+	}
+
+	if currentPage.Len() > 0 {
+		pages = append(pages, currentPage.String())
+	}
+
+	return pages
 }
 
 func (t *TelegramTransport) handleCallback(query *tgbotapi.CallbackQuery) {
@@ -303,6 +389,26 @@ func (t *TelegramTransport) handleCallback(query *tgbotapi.CallbackQuery) {
 				t.handleMCPCommand(chatID, page)
 			}
 		}
+
+	case "book":
+		if len(parts) >= 4 {
+			bookKey := parts[1] + ":" + parts[2]
+			pageNum, _ := strconv.Atoi(parts[3])
+
+			t.bookMu.RLock()
+			pages, ok := t.bookPages[bookKey]
+			t.bookMu.RUnlock()
+
+			if ok && pageNum >= 0 && pageNum < len(pages) {
+				keyboard := t.buildBookKeyboard(bookKey, pageNum, len(pages), chatID, "")
+				pageText := pages[pageNum] + fmt.Sprintf("\n\n📄 <i>Page %d/%d</i>", pageNum+1, len(pages))
+				t.editMessageWithKeyboardHTML(chatID, msgID, pageText, keyboard)
+			}
+		}
+
+	case "noop":
+		t.bot.Request(tgbotapi.NewCallback(query.ID, ""))
+		return
 	}
 
 	t.bot.Request(tgbotapi.NewCallback(query.ID, ""))
@@ -352,7 +458,12 @@ func formatArgsHTML(args map[string]interface{}) string {
 func (t *TelegramTransport) SendFileBytes(chatID int64, name string, data []byte, caption string) error {
 	log.Printf("[TG] Sending file: %s (%d bytes) to chat=%d", name, len(data), chatID)
 
-	file := tgbotapi.NewDocument(chatID, tgbotapi.FileBytes{Name: name, Bytes: data})
+	fileBytes := tgbotapi.FileBytes{
+		Name:  name,
+		Bytes: data,
+	}
+
+	file := tgbotapi.NewDocument(chatID, fileBytes)
 	if caption != "" {
 		file.Caption = caption
 		file.ParseMode = tgbotapi.ModeHTML
