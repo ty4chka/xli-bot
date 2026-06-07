@@ -44,7 +44,7 @@ func NewTelegram(token string, a *agent.Agent) (*TelegramTransport, error) {
 }
 
 func (t *TelegramTransport) SetAgent(a *agent.Agent) {
-	t.agent = a  // ← ФИКС: было "agent = a", стало "t.agent = a"
+	agent = a
 }
 
 func (t *TelegramTransport) Start() {
@@ -216,6 +216,12 @@ func (t *TelegramTransport) processAgentRequest(chatID int64, text string) {
 	log.Printf("[TG] Agent result: type=%s, tokens=%d, answer=%d chars", result.AgentType, result.TotalTokens, len(result.Answer))
 
 	response := formatToHTML(result.Answer)
+
+	// Защита от переполнения
+	if len(response) > MaxMessageLength-200 {
+		response = response[:MaxMessageLength-200] + "\n\n<i>... truncated</i>"
+	}
+
 	tokenInfo := fmt.Sprintf("<i>Tokens: in %s out %s total %s</i>",
 		formatNum(result.InputTokens),
 		formatNum(result.OutputTokens),
@@ -255,11 +261,12 @@ func (t *TelegramTransport) buildBookKeyboard(bookKey string, currentPage, total
 
 	var navRow []tgbotapi.InlineKeyboardButton
 	if currentPage > 0 {
-		navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData("◀ Prev", fmt.Sprintf("book:%s:%d", bookKey, currentPage-1)))
+		// ФИКС: разделитель | вместо :
+		navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData("◀ Prev", fmt.Sprintf("book|%s|%d", bookKey, currentPage-1)))
 	}
 	navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("%d/%d", currentPage+1, totalPages), "noop"))
 	if currentPage < totalPages-1 {
-		navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData("Next ▶", fmt.Sprintf("book:%s:%d", bookKey, currentPage+1)))
+		navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData("Next ▶", fmt.Sprintf("book|%s|%d", bookKey, currentPage+1)))
 	}
 	if len(navRow) > 0 {
 		rows = append(rows, navRow)
@@ -323,6 +330,27 @@ func (t *TelegramTransport) handleCallback(query *tgbotapi.CallbackQuery) {
 	data := query.Data
 	log.Printf("[TG] Callback: chat=%d data=%q", chatID, data)
 
+	// ФИКС: book использует | вместо :
+	if strings.HasPrefix(data, "book|") {
+		parts := strings.Split(data, "|")
+		if len(parts) >= 3 {
+			bookKey := parts[1]
+			pageNum, _ := strconv.Atoi(parts[2])
+
+			t.bookMu.RLock()
+			pages, ok := t.bookPages[bookKey]
+			t.bookMu.RUnlock()
+
+			if ok && pageNum >= 0 && pageNum < len(pages) {
+				keyboard := t.buildBookKeyboard(bookKey, pageNum, len(pages), chatID, "")
+				pageText := pages[pageNum] + fmt.Sprintf("\n\n📄 <i>Page %d/%d</i>", pageNum+1, len(pages))
+				t.editMessageWithKeyboardHTML(chatID, msgID, pageText, keyboard)
+			}
+		}
+		t.bot.Request(tgbotapi.NewCallback(query.ID, ""))
+		return
+	}
+
 	parts := strings.Split(data, ":")
 	if len(parts) < 2 {
 		t.bot.Request(tgbotapi.NewCallback(query.ID, ""))
@@ -364,22 +392,6 @@ func (t *TelegramTransport) handleCallback(query *tgbotapi.CallbackQuery) {
 				t.handleSkillsCommand(chatID, page, msgID)
 			case "mcp":
 				t.handleMCPCommand(chatID, page, msgID)
-			}
-		}
-
-	case "book":
-		if len(parts) >= 4 {
-			bookKey := parts[1] + ":" + parts[2]
-			pageNum, _ := strconv.Atoi(parts[3])
-
-			t.bookMu.RLock()
-			pages, ok := t.bookPages[bookKey]
-			t.bookMu.RUnlock()
-
-			if ok && pageNum >= 0 && pageNum < len(pages) {
-				keyboard := t.buildBookKeyboard(bookKey, pageNum, len(pages), chatID, "")
-				pageText := pages[pageNum] + fmt.Sprintf("\n\n📄 <i>Page %d/%d</i>", pageNum+1, len(pages))
-				t.editMessageWithKeyboardHTML(chatID, msgID, pageText, keyboard)
 			}
 		}
 
@@ -482,7 +494,9 @@ func (t *TelegramTransport) editMessageWithKeyboardHTML(chatID int64, msgID int,
 	t.bot.Request(edit)
 }
 
+// formatToHTML — ФИКС: blockquote expandable + защита от дублирования
 func formatToHTML(text string) string {
+	// Сначала обрабатываем blockquote (> текст)
 	lines := strings.Split(text, "\n")
 	var result []string
 	inQuote := false
@@ -491,7 +505,8 @@ func formatToHTML(text string) string {
 		trimmed := strings.TrimLeft(line, " ")
 		if strings.HasPrefix(trimmed, "> ") || strings.HasPrefix(trimmed, ">>") {
 			if !inQuote {
-				result = append(result, "<blockquote>")
+				// ФИКС: expandable blockquote для сворачивания
+				result = append(result, "<blockquote expandable>")
 				inQuote = true
 			}
 			quoteText := strings.TrimPrefix(trimmed, "> ")
@@ -511,6 +526,7 @@ func formatToHTML(text string) string {
 
 	text = strings.Join(result, "\n")
 
+	// Bold **text**
 	for strings.Contains(text, "**") {
 		idx := strings.Index(text, "**")
 		if idx == -1 {
@@ -525,6 +541,7 @@ func formatToHTML(text string) string {
 		text = text[:idx] + "<b>" + inner + "</b>" + text[endIdx+2:]
 	}
 
+	// Italic *text*
 	for strings.Contains(text, "*") {
 		idx := strings.Index(text, "*")
 		if idx == -1 || idx+1 >= len(text) {
@@ -542,6 +559,7 @@ func formatToHTML(text string) string {
 		text = text[:idx] + "<i>" + inner + "</i>" + text[endIdx+1:]
 	}
 
+	// Code `text`
 	for strings.Contains(text, "`") {
 		idx := strings.Index(text, "`")
 		if idx == -1 {
@@ -559,6 +577,7 @@ func formatToHTML(text string) string {
 		text = text[:idx] + "<code>" + inner + "</code>" + text[endIdx+1:]
 	}
 
+	// Code blocks ```text```
 	for strings.Contains(text, "```") {
 		idx := strings.Index(text, "```")
 		if idx == -1 {
