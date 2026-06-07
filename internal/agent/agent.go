@@ -12,12 +12,13 @@ import (
 )
 
 type Agent struct {
-	LLM      llm.Client
-	Memory   memory.Store
-	Executor *ToolExecutor
-	Skills   skills.Registry
-	MCP      *mcp.Client
-	MaxSteps int
+	LLM          llm.Client
+	Memory       memory.Store
+	Executor     *ToolExecutor
+	Skills       skills.Registry
+	MCP          *mcp.Client
+	MaxSteps     int
+	Orchestrator *Orchestrator
 }
 
 type AgentResult struct {
@@ -27,6 +28,7 @@ type AgentResult struct {
 	TotalTokens   int
 	ThinkingNotes []string
 	AgentLog      []string
+	AgentType     string // какой агент обработал
 }
 
 func NewAgent(llmClient llm.Client, store memory.Store, executor *ToolExecutor, skillRegistry skills.Registry, mcpClient *mcp.Client) *Agent {
@@ -40,11 +42,29 @@ func NewAgent(llmClient llm.Client, store memory.Store, executor *ToolExecutor, 
 	}
 }
 
+func (a *Agent) SetOrchestrator(o *Orchestrator) {
+	a.Orchestrator = o
+}
+
 func (a *Agent) Run(ctx context.Context, chatID int64, task string) (*AgentResult, error) {
-	result := &AgentResult{}
+	// Если есть оркестратор — используем его
+	if a.Orchestrator != nil {
+		analysis, err := a.Orchestrator.AnalyzeTask(ctx, task)
+		if err == nil && analysis.Confidence > 60 {
+			subAgent := a.Orchestrator.CreateSubAgent(analysis, a.Skills)
+			result, err := subAgent.Run(ctx, chatID, task)
+			if err == nil {
+				result.AgentType = string(analysis.AgentType)
+				return result, nil
+			}
+		}
+	}
+
+	// Fallback на основной агент
+	result := &AgentResult{AgentType: "general"}
 	a.Memory.SaveMessage(chatID, "user", task)
 
-	skillPrompt := a.Skills.BuildPrompt(task)
+	skillPrompt := a.Skills.BuildPromptRelevant(task, 5) // ← ленивый RAG, только 5 скиллов
 
 	for step := 0; step < a.MaxSteps; step++ {
 		history, _ := a.Memory.LoadHistory(chatID, 50)
@@ -70,7 +90,6 @@ func (a *Agent) Run(ctx context.Context, chatID int64, task string) (*AgentResul
 			break
 		}
 
-		// FIX: Сохраняем assistant ответ ПЕРЕД обработкой тулов
 		a.Memory.SaveMessage(chatID, "assistant", response.Content)
 
 		for _, call := range calls {
@@ -89,32 +108,8 @@ func (a *Agent) Run(ctx context.Context, chatID int64, task string) (*AgentResul
 				output = fmt.Sprintf("Error: %v", err)
 			}
 
-			// FIX: Tool output сохраняем как user message
 			a.Memory.SaveMessage(chatID, "user", fmt.Sprintf("Tool <%s>:\n%s", call.Tool, output))
 			a.Memory.SaveToolMemory(chatID, call.Tool, output)
-
-			// FIX: Авто-компиляция Go после file.write
-			if call.Tool == "file.write" {
-				path, _ := call.Args["path"].(string)
-				if strings.HasSuffix(path, ".go") {
-					compileOutput, compileErr := a.Executor.Execute(ctx, chatID, 0, ToolCall{
-						Tool: "terminal.run",
-						Args: map[string]interface{}{
-							"cmd": fmt.Sprintf("cd %s && go build -o %s %s",
-								filepath.Dir(path),
-								strings.TrimSuffix(filepath.Base(path), ".go"),
-								filepath.Base(path)),
-						},
-					})
-					if compileErr != nil {
-						output += fmt.Sprintf("\n\nCompile error: %v", compileErr)
-					} else {
-						output += fmt.Sprintf("\n\nCompiled: %s", compileOutput)
-					}
-					// Сохраняем результат компиляции
-					a.Memory.SaveMessage(chatID, "user", fmt.Sprintf("Tool <terminal.run>:\n%s", output))
-				}
-			}
 
 			if call.Tool == "thinking.note" {
 				if note, ok := call.Args["note"].(string); ok {
@@ -204,15 +199,9 @@ func (a *Agent) buildMessages(history []memory.Message, task, skillPrompt string
 		Content: sb.String(),
 	})
 
-	// FIX: Фильтруем историю — убираем дубли и проверяем порядок
 	var lastRole string
 	for _, msg := range history {
-		// Пропускаем если два assistant подряд или два user подряд
-		if msg.Role == lastRole {
-			continue
-		}
-		// Пропускаем пустые
-		if strings.TrimSpace(msg.Content) == "" {
+		if msg.Role == lastRole || strings.TrimSpace(msg.Content) == "" {
 			continue
 		}
 		messages = append(messages, llm.Message{
@@ -222,9 +211,7 @@ func (a *Agent) buildMessages(history []memory.Message, task, skillPrompt string
 		lastRole = msg.Role
 	}
 
-	// FIX: Убеждаемся что последнее сообщение — user
 	if lastRole == "assistant" {
-		// Добавляем фиктивный user запрос чтобы Mistral не ругался
 		messages = append(messages, llm.Message{
 			Role:    "user",
 			Content: "Continue",
@@ -250,5 +237,6 @@ func (a *Agent) SimpleAsk(ctx context.Context, task string) (*AgentResult, error
 		InputTokens:  response.InputTokens,
 		OutputTokens: response.OutputTokens,
 		TotalTokens:  response.TotalTokens,
+		AgentType:    "general",
 	}, nil
 }
