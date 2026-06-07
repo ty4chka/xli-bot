@@ -44,7 +44,7 @@ func NewTelegram(token string, a *agent.Agent) (*TelegramTransport, error) {
 }
 
 func (t *TelegramTransport) SetAgent(a *agent.Agent) {
-	agent = a
+	t.agent = a
 }
 
 func (t *TelegramTransport) Start() {
