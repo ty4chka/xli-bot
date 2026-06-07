@@ -47,6 +47,33 @@ type MCPServer struct {
 	IsNPX   bool
 }
 
+// Map tool -> server для быстрого routing
+var toolToServer = map[string]string{
+	"search_code":              "knowledge",
+	"analyze_traceback":        "debugger",
+	"run_tests":                "auto-tester",
+	"fix_test":                 "auto-tester",
+	"suggest_command":          "shell-helper",
+	"fix_typo":                 "shell-helper",
+	"generate_complex_command": "shell-helper",
+	"list_dependencies":        "package-monitor",
+	"check_vulnerabilities":    "package-monitor",
+	"update_dependencies":      "package-monitor",
+	"prompt_create":            "prompt-cli",
+	"prompt_get":               "prompt-cli",
+	"prompt_list":              "prompt-cli",
+	"prompt_evaluate":          "prompt-cli",
+	"blame_line":               "archaeologist",
+	"code_ownership":           "archaeologist",
+	"commit_history":           "archaeologist",
+	"temporal_coupling":        "archaeologist",
+	"analyze_complexity":       "refactor",
+	"detect_long_methods":      "refactor",
+	"dependency_graph":         "architecture",
+	"circular_dependencies":    "architecture",
+	"suggest_modules":          "architecture",
+	"discover_tests":           "auto-tester",
+}
 
 func NewClient() *Client {
 	return &Client{
@@ -74,7 +101,6 @@ func (c *Client) Register(server MCPServer) error {
 	return nil
 }
 
-// Ленивое подключение
 func (c *Client) ensureConnected(serverName string) (*ServerConn, error) {
 	c.mu.RLock()
 	conn, ok := c.servers[serverName]
@@ -125,7 +151,6 @@ func (c *Client) ensureConnected(serverName string) (*ServerConn, error) {
 	return conn, nil
 }
 
-// CallTool
 func (c *Client) CallTool(ctx context.Context, serverName, toolName string, args map[string]interface{}) (string, error) {
 	conn, err := c.ensureConnected(serverName)
 	if err != nil {
@@ -180,8 +205,21 @@ func (c *Client) CallTool(ctx context.Context, serverName, toolName string, args
 	return "", fmt.Errorf("empty response")
 }
 
-// CallToolAuto — ФИКС deadlock
+// CallToolAuto — ФИКС: routing по имени тулза, не перебор всех серверов
 func (c *Client) CallToolAuto(ctx context.Context, toolName string, args map[string]interface{}) (string, error) {
+	// Сначала пробуем точный routing
+	if serverName, ok := toolToServer[toolName]; ok {
+		result, err := c.CallTool(ctx, serverName, toolName, args)
+		if err == nil {
+			return result, nil
+		}
+		// Если сервер не найден или тул не поддерживается — fallback
+		if !strings.Contains(err.Error(), "not found") && !strings.Contains(err.Error(), "Unknown") {
+			return "", err
+		}
+	}
+
+	// Fallback: перебираем все enabled серверы
 	c.mu.RLock()
 	serverNames := make([]string, 0, len(c.servers))
 	for name, conn := range c.servers {
@@ -204,7 +242,6 @@ func (c *Client) CallToolAuto(ctx context.Context, toolName string, args map[str
 	return "", fmt.Errorf("tool not found in any MCP server: %s", toolName)
 }
 
-// ListAllTools — возвращает список зарегистрированных серверов как тулзы
 func (c *Client) ListAllTools() []Tool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -227,11 +264,9 @@ func (c *Client) ListAllTools() []Tool {
 	return tools
 }
 
-// GetServerNames — для логов
 func (c *Client) GetServerNames() []string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-
 	names := make([]string, 0, len(c.servers))
 	for name := range c.servers {
 		names = append(names, name)
@@ -239,7 +274,6 @@ func (c *Client) GetServerNames() []string {
 	return names
 }
 
-// Status — строка статуса для /mcp
 func (c *Client) Status() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -254,14 +288,15 @@ func (c *Client) Status() string {
 		}
 		if conn.connected {
 			connected++
-			sb.WriteString(fmt.Sprintf("  ✅ <b>%s</b> — connected\n", name))
+			sb.WriteString(fmt.Sprintf("  ✅ %s — connected\n", name))
 		} else if conn.Enabled {
-			sb.WriteString(fmt.Sprintf("  ⏳ <b>%s</b> — ready (lazy)\n", name))
+			sb.WriteString(fmt.Sprintf("  ⏳ %s — ready (lazy)\n", name))
 		} else {
-			sb.WriteString(fmt.Sprintf("  ❌ <b>%s</b> — disabled\n", name))
+			sb.WriteString(fmt.Sprintf("  ❌ %s — disabled\n", name))
 		}
 	}
-	return fmt.Sprintf("<b>MCP servers:</b> <code>%d total</code> | <code>%d enabled</code> | <code>%d connected</code>\n\n%s", total, enabled, connected, sb.String())
+	return fmt.Sprintf("MCP servers: %d total | %d enabled | %d connected\n\n%s",
+		total, enabled, connected, sb.String())
 }
 
 func (c *Client) Disconnect(serverName string) error {
