@@ -47,6 +47,7 @@ func main() {
 	}
 	log.Printf("Skills loaded: %d", len(skillRegistry.GetAll()))
 
+	// MCP — ленивая загрузка, только регистрация, без eager connect
 	mcpClient := mcp.NewClient()
 	mcpServers, err := mcp.AutoDiscover("mcp_servers")
 	if err != nil {
@@ -57,13 +58,9 @@ func main() {
 				log.Printf("MCP register error %s: %v", server.Name, err)
 			}
 		}
-		for _, server := range mcpServers {
-			if err := mcpClient.Connect(server.Name); err != nil {
-				log.Printf("MCP connect error %s: %v", server.Name, err)
-			}
-		}
+		// НЕ делаем Connect здесь — ленивое подключение при первом вызове
 	}
-	log.Printf("MCP servers: %d registered, %d tools", len(mcpServers), len(mcpClient.ListAllTools()))
+	log.Printf("MCP servers: %d registered (lazy load)", len(mcpServers))
 
 	llmClient := llm.NewMistralClient(cfg.LLM.APIKey, cfg.LLM.Provider)
 	log.Println("LLM client created")
@@ -87,7 +84,6 @@ func main() {
 		defer ticker.Stop()
 		for range ticker.C {
 			mcpClient.CleanupIdle()
-			mcpClient.AutoReconnect()
 		}
 	}()
 
