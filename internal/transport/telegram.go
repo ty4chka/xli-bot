@@ -74,15 +74,24 @@ func (t *TelegramTransport) handleCommand(msg *tgbotapi.Message) {
 
 	switch msg.Command() {
 	case "start":
-		t.sendHTML(chatID, "<b>XLI Bot</b> started!\n\nUse <code>/oa &lt;query&gt;</code> or just text me.")
+		t.sendHTML(chatID, "<b>XLI Bot</b> started!
+
+Use <code>/oa &lt;query&gt;</code> or just text me.")
 
 	case "help":
-		help := "<b>Commands:</b>\n" +
-			"<code>/oa &lt;query&gt;</code> - ask agent\n" +
-			"<code>/clear</code> - clear memory\n" +
-			"<code>/skills</code> - list skills\n" +
-			"<code>/mcp</code> - MCP status\n" +
-			"<code>/status</code> - bot status\n\n" +
+		help := "<b>Commands:</b>
+" +
+			"<code>/oa &lt;query&gt;</code> - ask agent
+" +
+			"<code>/clear</code> - clear memory
+" +
+			"<code>/skills</code> - list skills
+" +
+			"<code>/mcp</code> - MCP status
+" +
+			"<code>/status</code> - bot status
+
+" +
 			"Just text me - I will respond."
 		t.sendHTML(chatID, help)
 
@@ -91,7 +100,8 @@ func (t *TelegramTransport) handleCommand(msg *tgbotapi.Message) {
 		t.sendHTML(chatID, "<b>Memory cleared!</b>")
 
 	case "status":
-		t.sendHTML(chatID, "Bot running\nSQLite connected")
+		t.sendHTML(chatID, "Bot running
+SQLite connected")
 
 	case "skills":
 		t.handleSkillsCommand(chatID)
@@ -121,16 +131,19 @@ func (t *TelegramTransport) handleSkillsCommand(chatID int64) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString("<b>Skills:</b>\n\n")
+	sb.WriteString("<b>Skills:</b>
+
+")
 	for _, s := range all {
-		status := "⚪"
+		status := "o"
 		if activeMap[s.Name] {
-			status = "🟢"
+			status = "+"
 		}
 		if s.TriggerMode == "always" {
-			status = "🔒"
+			status = "*"
 		}
-		sb.WriteString(fmt.Sprintf("%s <code>%s</code> (%s)\n", status, s.Name, s.TriggerMode))
+		sb.WriteString(fmt.Sprintf("%s <code>%s</code> (%s)
+", status, s.Name, s.TriggerMode))
 	}
 	t.sendHTML(chatID, sb.String())
 }
@@ -138,12 +151,15 @@ func (t *TelegramTransport) handleSkillsCommand(chatID int64) {
 func (t *TelegramTransport) handleMCPCommand(chatID int64) {
 	tools := t.agent.MCP.ListAllTools()
 	var sb strings.Builder
-	sb.WriteString("<b>MCP tools:</b>\n\n")
+	sb.WriteString("<b>MCP tools:</b>
+
+")
 	if len(tools) == 0 {
 		sb.WriteString("<i>No servers connected</i>")
 	} else {
 		for _, tool := range tools {
-			sb.WriteString(fmt.Sprintf("• <code>%s</code> - %s\n", tool.Name, tool.Description))
+			sb.WriteString(fmt.Sprintf("- <code>%s</code> - %s
+", tool.Name, tool.Description))
 		}
 	}
 	t.sendHTML(chatID, sb.String())
@@ -170,26 +186,27 @@ func (t *TelegramTransport) processAgentRequest(chatID int64, text string) {
 
 	log.Printf("[AGENT] result: tokens=%d answer_len=%d", result.TotalTokens, len(result.Answer))
 
-	// Форматируем ответ с HTML
 	response := formatToHTML(result.Answer)
 
-	// Оборачиваем длинные ответы в сворачиваемую цитату
 	if len(response) > 500 {
-		response = "<blockquote expandable>\n" + response + "\n</blockquote>"
+		response = "<blockquote expandable>
+" + response + "
+</blockquote>"
 	}
 
-	tokenInfo := fmt.Sprintf("<i>Tokens: in %s out %s total %s</i>", 
-		formatNum(result.InputTokens), 
-		formatNum(result.OutputTokens), 
+	tokenInfo := fmt.Sprintf("<i>Tokens: in %s out %s total %s</i>",
+		formatNum(result.InputTokens),
+		formatNum(result.OutputTokens),
 		formatNum(result.TotalTokens))
 
-	finalText := response + "\n\n" + tokenInfo
+	finalText := response + "
 
-	// Цветные кнопки (Bot API 9.4+)
+" + tokenInfo
+
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
-			newStyledButton("🧹 Clear", fmt.Sprintf("action:clear:%d", chatID), "danger"),
-			newStyledButton("🔃 Regen", fmt.Sprintf("action:regen:%d:%s", chatID, text), "primary"),
+			tgbotapi.NewInlineKeyboardButtonData("Clear", fmt.Sprintf("action:clear:%d", chatID)),
+			tgbotapi.NewInlineKeyboardButtonData("Regen", fmt.Sprintf("action:regen:%d:%s", chatID, text)),
 		),
 	)
 
@@ -248,13 +265,18 @@ func (t *TelegramTransport) ShowConfirmation(chatID int64, msgID int, toolName s
 	t.mu.Unlock()
 
 	argsStr := formatArgsHTML(args)
-	text := fmt.Sprintf("<b>Confirm action:</b>\n\n<b>Tool:</b> <code>%s</code>\n<b>Args:</b>\n%s\n\nExecute?", toolName, argsStr)
+	text := fmt.Sprintf("<b>Confirm action:</b>
 
-	// Цветные кнопки подтверждения
+<b>Tool:</b> <code>%s</code>
+<b>Args:</b>
+%s
+
+Execute?", toolName, argsStr)
+
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
-			newStyledButton("✅ Yes", fmt.Sprintf("confirm:yes:%s", token), "success"),
-			newStyledButton("❌ No", fmt.Sprintf("confirm:no:%s", token), "danger"),
+			tgbotapi.NewInlineKeyboardButtonData("Yes", fmt.Sprintf("confirm:yes:%s", token)),
+			tgbotapi.NewInlineKeyboardButtonData("No", fmt.Sprintf("confirm:no:%s", token)),
 		),
 	)
 
@@ -277,9 +299,10 @@ func (t *TelegramTransport) ShowConfirmation(chatID int64, msgID int, toolName s
 func formatArgsHTML(args map[string]interface{}) string {
 	var parts []string
 	for k, v := range args {
-		parts = append(parts, fmt.Sprintf("  • <b>%s:</b> <code>%v</code>", k, v))
+		parts = append(parts, fmt.Sprintf("  - <b>%s:</b> <code>%v</code>", k, v))
 	}
-	return strings.Join(parts, "\n")
+	return strings.Join(parts, "
+")
 }
 
 func (t *TelegramTransport) SendFileBytes(chatID int64, name string, data []byte, caption string) error {
@@ -291,8 +314,6 @@ func (t *TelegramTransport) SendFileBytes(chatID int64, name string, data []byte
 	_, err := t.bot.Send(file)
 	return err
 }
-
-// === HTML helpers ===
 
 func (t *TelegramTransport) sendHTML(chatID int64, text string) (tgbotapi.Message, error) {
 	msg := tgbotapi.NewMessage(chatID, text)
@@ -313,73 +334,77 @@ func (t *TelegramTransport) editMessageWithKeyboardHTML(chatID int64, msgID int,
 	t.bot.Request(edit)
 }
 
-// === Styled buttons (Bot API 9.4+) ===
-
-func newStyledButton(text, callbackData, style string) tgbotapi.InlineKeyboardButton {
-	btn := tgbotapi.NewInlineKeyboardButtonData(text, callbackData)
-	// Для библиотеки v5 нужно использовать поле InlineKeyboardButtonStyle
-	// Если не поддерживается - просто возвращаем обычную кнопку
-	return btn
-}
-
-// === Format helpers ===
-
 func formatToHTML(text string) string {
-	// Экранируем HTML
 	text = html.EscapeString(text)
 
-	// Конвертируем **bold** → <b>bold</b>
 	for strings.Contains(text, "**") {
 		idx := strings.Index(text, "**")
-		if idx == -1 { break }
+		if idx == -1 {
+			break
+		}
 		endIdx := strings.Index(text[idx+2:], "**")
-		if endIdx == -1 { break }
+		if endIdx == -1 {
+			break
+		}
 		endIdx += idx + 2
 		inner := text[idx+2 : endIdx]
 		text = text[:idx] + "<b>" + inner + "</b>" + text[endIdx+2:]
 	}
 
-	// Конвертируем *italic* → <i>italic</i>
 	for strings.Contains(text, "*") {
 		idx := strings.Index(text, "*")
-		if idx == -1 || idx+1 >= len(text) { break }
-		if text[idx+1] == '*' { continue } // skip **
+		if idx == -1 || idx+1 >= len(text) {
+			break
+		}
+		if text[idx+1] == '*' {
+			continue
+		}
 		endIdx := strings.Index(text[idx+1:], "*")
-		if endIdx == -1 { break }
+		if endIdx == -1 {
+			break
+		}
 		endIdx += idx + 1
 		inner := text[idx+1 : endIdx]
 		text = text[:idx] + "<i>" + inner + "</i>" + text[endIdx+1:]
 	}
 
-	// Конвертируем `code` → <code>code</code>
 	for strings.Contains(text, "`") {
 		idx := strings.Index(text, "`")
-		if idx == -1 { break }
-		if idx+1 < len(text) && text[idx+1] == '`' { continue } // skip ```
+		if idx == -1 {
+			break
+		}
+		if idx+1 < len(text) && text[idx+1] == '`' {
+			continue
+		}
 		endIdx := strings.Index(text[idx+1:], "`")
-		if endIdx == -1 { break }
+		if endIdx == -1 {
+			break
+		}
 		endIdx += idx + 1
 		inner := text[idx+1 : endIdx]
 		text = text[:idx] + "<code>" + inner + "</code>" + text[endIdx+1:]
 	}
 
-	// Конвертируем ```code blocks``` → <pre><code>...</code></pre>
 	for strings.Contains(text, "```") {
 		idx := strings.Index(text, "```")
-		if idx == -1 { break }
+		if idx == -1 {
+			break
+		}
 		endIdx := strings.Index(text[idx+3:], "```")
-		if endIdx == -1 { break }
+		if endIdx == -1 {
+			break
+		}
 		endIdx += idx + 3
 		inner := text[idx+3 : endIdx]
-		// Убираем язык если есть
-		if nl := strings.Index(inner, "\n"); nl > 0 && nl < 20 {
+		if nl := strings.Index(inner, "
+"); nl > 0 && nl < 20 {
 			inner = inner[nl+1:]
 		}
 		text = text[:idx] + "<pre><code>" + inner + "</code></pre>" + text[endIdx+3:]
 	}
 
-	// Конвертируем переносы строк
-	text = strings.ReplaceAll(text, "\n", "
+	text = strings.ReplaceAll(text, "
+", "
 ")
 
 	return text
