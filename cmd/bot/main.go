@@ -10,6 +10,7 @@ import (
 	"github.com/oblachko/xli-bot/internal/llm"
 	"github.com/oblachko/xli-bot/internal/mcp"
 	"github.com/oblachko/xli-bot/internal/memory"
+	"github.com/oblachko/xli-bot/internal/sandbox"
 	"github.com/oblachko/xli-bot/internal/skills"
 	"github.com/oblachko/xli-bot/internal/transport"
 )
@@ -40,7 +41,6 @@ func main() {
 	defer store.Close()
 	log.Println("SQLite OK")
 
-	// Skills: ленивая загрузка — сканируем при старте, но в контекст идут только релевантные
 	skillRegistry := skills.NewHotLoader()
 	if err := skillRegistry.LoadFromDir("skills"); err != nil {
 		log.Printf("Skills warning: %v", err)
@@ -51,11 +51,19 @@ func main() {
 	mcpServers, err := mcp.AutoDiscover("mcp_servers")
 	if err != nil {
 		log.Printf("MCP warning: %v", err)
+	} else {
+		for _, server := range mcpServers {
+			if err := mcpClient.Register(server); err != nil {
+				log.Printf("MCP register error %s: %v", server.Name, err)
+			}
+		}
+		for _, server := range mcpServers {
+			if err := mcpClient.Connect(server.Name); err != nil {
+				log.Printf("MCP connect error %s: %v", server.Name, err)
+			}
+		}
 	}
-	for _, server := range mcpServers {
-		mcpClient.Register(server)
-	}
-	log.Printf("MCP servers: %d", len(mcpServers))
+	log.Printf("MCP servers: %d registered, %d tools", len(mcpServers), len(mcpClient.ListAllTools()))
 
 	llmClient := llm.NewMistralClient(cfg.LLM.APIKey, cfg.LLM.Provider)
 	log.Println("LLM client created")
@@ -66,13 +74,11 @@ func main() {
 	}
 	log.Println("Telegram transport created")
 
-	executor := agent.NewToolExecutor(tg)
+	sbx, _ := sandbox.NewSandbox("sandbox")
+	executor := agent.NewToolExecutor(tg, sbx)
 	botAgent := agent.NewAgent(llmClient, store, executor, skillRegistry, mcpClient)
-	
-	// Orchestrator для мультиагентности
 	orchestrator := agent.NewOrchestrator(botAgent, llmClient)
 	botAgent.SetOrchestrator(orchestrator)
-	
 	tg.SetAgent(botAgent)
 	log.Println("Agent + Orchestrator created")
 
