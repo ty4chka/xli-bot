@@ -471,7 +471,3 @@ func formatNum(n int) string {
 	}
 	return fmt.Sprintf("%d", n)
 }
-t64(n)/1000)
-	}
-	return fmt.Sprintf("%d", n)
-}
