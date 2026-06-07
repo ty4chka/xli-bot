@@ -12,7 +12,6 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
 	"github.com/oblachko/xli-bot/internal/agent"
-	"github.com/oblachko/xli-bot/internal/utils"
 )
 
 type TelegramTransport struct {
@@ -402,10 +401,6 @@ func formatToHTML(text string) string {
 		}
 		text = text[:idx] + "<pre><code>" + inner + "</code></pre>" + text[endIdx+3:]
 	}
-
-	text = strings.ReplaceAll(text, "
-", "
-")
 
 	return text
 }
