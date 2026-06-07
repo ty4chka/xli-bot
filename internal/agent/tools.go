@@ -106,12 +106,41 @@ func (te *ToolExecutor) fileWrite(ctx context.Context, chatID int64, msgID int, 
 		return "", err
 	}
 
-	// FIX: Отправляем файл с проверкой ошибки и правильным именем
 	fileName := filepath.Base(path)
 	data := []byte(content)
+
+	// FIX: Отправляем файл с проверкой ошибки
 	if err := te.transport.SendFileBytes(chatID, fileName, data,
 		fmt.Sprintf("File: <code>%s</code> (%d bytes)", fileName, len(data))); err != nil {
 		return fmt.Sprintf("Written: %s (%d bytes) [send error: %v]", path, len(data), err), nil
+	}
+
+	// FIX: Авто-компиляция Go
+	if strings.HasSuffix(path, ".go") {
+		dir := filepath.Dir(path)
+		binName := strings.TrimSuffix(fileName, ".go")
+
+		var compileCmd string
+		if dir == "." || dir == "" {
+			compileCmd = fmt.Sprintf("go build -o %s %s", binName, fileName)
+		} else {
+			compileCmd = fmt.Sprintf("cd %s && go build -o %s %s", dir, binName, fileName)
+		}
+
+		cmd := exec.CommandContext(ctx, "sh", "-c", compileCmd)
+		compileOutput, compileErr := cmd.CombinedOutput()
+		if compileErr != nil {
+			return fmt.Sprintf("Written: %s (%d bytes)\nCompile error: %v\n%s", path, len(data), compileErr, string(compileOutput)), nil
+		}
+
+		// Отправляем скомпилированный бинарник
+		binPath := filepath.Join(dir, binName)
+		if binData, err := os.ReadFile(binPath); err == nil {
+			te.transport.SendFileBytes(chatID, binName, binData,
+				fmt.Sprintf("Compiled: <code>%s</code>", binName))
+		}
+
+		return fmt.Sprintf("Written: %s (%d bytes)\nCompiled: %s\n%s", path, len(data), binName, string(compileOutput)), nil
 	}
 
 	return fmt.Sprintf("Written: %s (%d bytes)", path, len(data)), nil
