@@ -44,7 +44,7 @@ func NewTelegram(token string, a *agent.Agent) (*TelegramTransport, error) {
 }
 
 func (t *TelegramTransport) SetAgent(a *agent.Agent) {
-	agent = a
+	t.agent = a  // ← ФИКС: было "agent = a", стало "t.agent = a"
 }
 
 func (t *TelegramTransport) Start() {
@@ -102,11 +102,9 @@ func (t *TelegramTransport) handleCommand(msg *tgbotapi.Message) {
 		t.sendHTML(chatID, "Bot running\nSQLite connected")
 
 	case "skills":
-		// Отправляем новое сообщение с клавиатурой
 		t.handleSkillsCommand(chatID, 0, 0)
 
 	case "mcp":
-		// Отправляем новое сообщение с клавиатурой
 		t.handleMCPCommand(chatID, 0, 0)
 
 	case "oa":
@@ -122,7 +120,6 @@ func (t *TelegramTransport) handleCommand(msg *tgbotapi.Message) {
 	}
 }
 
-// handleSkillsCommand — msgID=0 для нового сообщения, msgID>0 для редактирования
 func (t *TelegramTransport) handleSkillsCommand(chatID int64, page int, msgID int) {
 	all := t.agent.Skills.GetAll()
 	active := t.agent.Skills.GetActive()
@@ -168,7 +165,6 @@ func (t *TelegramTransport) handleSkillsCommand(chatID int64, page int, msgID in
 	}
 
 	if msgID == 0 {
-		// Новое сообщение
 		if len(rows) > 0 {
 			keyboard := tgbotapi.NewInlineKeyboardMarkup(rows...)
 			t.sendMessageWithKeyboardHTML(chatID, sb.String(), keyboard)
@@ -176,7 +172,6 @@ func (t *TelegramTransport) handleSkillsCommand(chatID int64, page int, msgID in
 			t.sendHTML(chatID, sb.String())
 		}
 	} else {
-		// Редактирование существующего
 		edit := tgbotapi.NewEditMessageText(chatID, msgID, sb.String())
 		edit.ParseMode = tgbotapi.ModeHTML
 		if len(rows) > 0 {
@@ -187,7 +182,6 @@ func (t *TelegramTransport) handleSkillsCommand(chatID int64, page int, msgID in
 	}
 }
 
-// handleMCPCommand — msgID=0 для нового сообщения, msgID>0 для редактирования
 func (t *TelegramTransport) handleMCPCommand(chatID int64, page int, msgID int) {
 	status := t.agent.MCP.Status()
 
@@ -367,10 +361,8 @@ func (t *TelegramTransport) handleCallback(query *tgbotapi.CallbackQuery) {
 			page, _ := strconv.Atoi(parts[2])
 			switch parts[1] {
 			case "skills":
-				// РЕДАКТИРУЕМ существующее сообщение!
 				t.handleSkillsCommand(chatID, page, msgID)
 			case "mcp":
-				// РЕДАКТИРУЕМ существующее сообщение!
 				t.handleMCPCommand(chatID, page, msgID)
 			}
 		}
@@ -490,9 +482,7 @@ func (t *TelegramTransport) editMessageWithKeyboardHTML(chatID int64, msgID int,
 	t.bot.Request(edit)
 }
 
-// formatToHTML — конвертирует markdown в HTML + blockquote
 func formatToHTML(text string) string {
-	// Сначала обрабатываем blockquote (> текст)
 	lines := strings.Split(text, "\n")
 	var result []string
 	inQuote := false
@@ -521,7 +511,6 @@ func formatToHTML(text string) string {
 
 	text = strings.Join(result, "\n")
 
-	// Bold **text**
 	for strings.Contains(text, "**") {
 		idx := strings.Index(text, "**")
 		if idx == -1 {
@@ -536,7 +525,6 @@ func formatToHTML(text string) string {
 		text = text[:idx] + "<b>" + inner + "</b>" + text[endIdx+2:]
 	}
 
-	// Italic *text*
 	for strings.Contains(text, "*") {
 		idx := strings.Index(text, "*")
 		if idx == -1 || idx+1 >= len(text) {
@@ -554,7 +542,6 @@ func formatToHTML(text string) string {
 		text = text[:idx] + "<i>" + inner + "</i>" + text[endIdx+1:]
 	}
 
-	// Code `text`
 	for strings.Contains(text, "`") {
 		idx := strings.Index(text, "`")
 		if idx == -1 {
@@ -572,7 +559,6 @@ func formatToHTML(text string) string {
 		text = text[:idx] + "<code>" + inner + "</code>" + text[endIdx+1:]
 	}
 
-	// Code blocks ```text```
 	for strings.Contains(text, "```") {
 		idx := strings.Index(text, "```")
 		if idx == -1 {
