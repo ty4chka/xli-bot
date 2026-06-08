@@ -1,3 +1,4 @@
+
 package transport
 
 import (
@@ -82,24 +83,15 @@ func (t *TelegramTransport) handleCommand(msg *tgbotapi.Message) {
 
 	switch msg.Command() {
 	case "start":
-		t.sendHTML(chatID, "<b>XLI Bot</b> started!
-
-Use <code>/oa &lt;query&gt;</code> or just text me.")
+		t.sendHTML(chatID, "<b>XLI Bot</b> started!\n\nUse <code>/oa &lt;query&gt;</code> or just text me.")
 
 	case "help":
-		help := "<b>Commands:</b>
-" +
-			"<code>/oa &lt;query&gt;</code> - ask agent
-" +
-			"<code>/clear</code> - clear memory
-" +
-			"<code>/skills</code> - list skills
-" +
-			"<code>/mcp</code> - MCP status
-" +
-			"<code>/status</code> - bot status
-
-" +
+		help := "<b>Commands:</b>\n" +
+			"<code>/oa &lt;query&gt;</code> - ask agent\n" +
+			"<code>/clear</code> - clear memory\n" +
+			"<code>/skills</code> - list skills\n" +
+			"<code>/mcp</code> - MCP status\n" +
+			"<code>/status</code> - bot status\n\n" +
 			"Just text me - I will respond."
 		t.sendHTML(chatID, help)
 
@@ -108,8 +100,7 @@ Use <code>/oa &lt;query&gt;</code> or just text me.")
 		t.sendHTML(chatID, "<b>Memory cleared!</b>")
 
 	case "status":
-		t.sendHTML(chatID, "Bot running
-SQLite connected")
+		t.sendHTML(chatID, "Bot running\nSQLite connected")
 
 	case "skills":
 		t.handleSkillsCommand(chatID, 0, 0)
@@ -147,9 +138,7 @@ func (t *TelegramTransport) handleSkillsCommand(chatID int64, page int, msgID in
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("<b>Skills:</b> <code>%d total</code>
-
-", total))
+	sb.WriteString(fmt.Sprintf("<b>Skills:</b> <code>%d total</code>\n\n", total))
 
 	for i := start; i < end; i++ {
 		s := all[i]
@@ -160,8 +149,7 @@ func (t *TelegramTransport) handleSkillsCommand(chatID int64, page int, msgID in
 		if s.TriggerMode == "always" {
 			status = "★"
 		}
-		sb.WriteString(fmt.Sprintf("%s <code>%s</code> — <i>%s</i>
-", status, s.Name, s.TriggerMode))
+		sb.WriteString(fmt.Sprintf("%s <code>%s</code> — <i>%s</i>\n", status, s.Name, s.TriggerMode))
 	}
 
 	var rows [][]tgbotapi.InlineKeyboardButton
@@ -243,9 +231,7 @@ func (t *TelegramTransport) processAgentRequest(chatID int64, text string) {
 
 	// Truncate if too long
 	if len(response) > MaxMessageLength-200 {
-		response = response[:MaxMessageLength-200] + "
-
-<i>... truncated</i>"
+		response = response[:MaxMessageLength-200] + "\n\n<i>... truncated</i>"
 	}
 
 	tokenInfo := fmt.Sprintf("<i>Tokens: in %s out %s total %s</i>",
@@ -253,9 +239,7 @@ func (t *TelegramTransport) processAgentRequest(chatID int64, text string) {
 		formatNum(result.OutputTokens),
 		formatNum(result.TotalTokens))
 
-	fullText := response + "
-
-" + tokenInfo
+	fullText := response + "\n\n" + tokenInfo
 
 	if len(fullText) <= MaxMessageLength {
 		// Build action buttons based on result
@@ -274,10 +258,7 @@ func (t *TelegramTransport) processAgentRequest(chatID int64, text string) {
 	t.bookPages[bookKey] = pages
 	t.bookMu.Unlock()
 
-	firstPage := pages[0] + fmt.Sprintf("
-
-📄 <i>Page 1/%d</i>
-%s", totalPages, tokenInfo)
+	firstPage := pages[0] + fmt.Sprintf("\n\n📄 <i>Page 1/%d</i>\n%s", totalPages, tokenInfo)
 	keyboard := t.buildBookKeyboard(bookKey, 0, totalPages, chatID, text)
 	t.editMessageWithKeyboardHTML(chatID, thinkMsg.MessageID, firstPage, keyboard)
 	log.Printf("[TG] Book page 1/%d shown", totalPages)
@@ -334,14 +315,11 @@ func (t *TelegramTransport) splitIntoPages(text string, maxLen int) []string {
 	var pages []string
 	var currentPage strings.Builder
 
-	paragraphs := strings.Split(text, "
-
-")
+	paragraphs := strings.Split(text, "\n\n")
 
 	for _, para := range paragraphs {
 		if len(para) > maxLen {
-			lines := strings.Split(para, "
-")
+			lines := strings.Split(para, "\n")
 			for _, line := range lines {
 				if currentPage.Len()+len(line)+1 > maxLen {
 					if currentPage.Len() > 0 {
@@ -350,8 +328,7 @@ func (t *TelegramTransport) splitIntoPages(text string, maxLen int) []string {
 					}
 				}
 				if currentPage.Len() > 0 {
-					currentPage.WriteString("
-")
+					currentPage.WriteString("\n")
 				}
 				currentPage.WriteString(line)
 			}
@@ -366,9 +343,7 @@ func (t *TelegramTransport) splitIntoPages(text string, maxLen int) []string {
 		}
 
 		if currentPage.Len() > 0 {
-			currentPage.WriteString("
-
-")
+			currentPage.WriteString("\n\n")
 		}
 		currentPage.WriteString(para)
 	}
@@ -399,9 +374,7 @@ func (t *TelegramTransport) handleCallback(query *tgbotapi.CallbackQuery) {
 
 			if ok && pageNum >= 0 && pageNum < len(pages) {
 				keyboard := t.buildBookKeyboard(bookKey, pageNum, len(pages), chatID, "")
-				pageText := pages[pageNum] + fmt.Sprintf("
-
-📄 <i>Page %d/%d</i>", pageNum+1, len(pages))
+				pageText := pages[pageNum] + fmt.Sprintf("\n\n📄 <i>Page %d/%d</i>", pageNum+1, len(pages))
 				t.editMessageWithKeyboardHTML(chatID, msgID, pageText, keyboard)
 			}
 		}
@@ -490,13 +463,7 @@ func (t *TelegramTransport) ShowConfirmation(chatID int64, msgID int, toolName s
 	t.mu.Unlock()
 
 	argsStr := formatArgsHTML(args)
-	text := fmt.Sprintf("<b>Confirm action:</b>
-
-<b>Tool:</b> <code>%s</code>
-<b>Args:</b>
-%s
-
-Execute?", toolName, argsStr)
+	text := fmt.Sprintf("<b>Confirm action:</b>\n\n<b>Tool:</b> <code>%s</code>\n<b>Args:</b>\n%s\n\nExecute?", toolName, argsStr)
 
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
@@ -526,8 +493,7 @@ func formatArgsHTML(args map[string]interface{}) string {
 	for k, v := range args {
 		parts = append(parts, fmt.Sprintf("  - <b>%s:</b> <code>%v</code>", k, v))
 	}
-	return strings.Join(parts, "
-")
+	return strings.Join(parts, "\n")
 }
 
 func (t *TelegramTransport) SendFileBytes(chatID int64, name string, data []byte, caption string) error {
@@ -581,8 +547,7 @@ func (t *TelegramTransport) editMessageWithKeyboardHTML(chatID int64, msgID int,
 }
 
 func formatToHTML(text string) string {
-	lines := strings.Split(text, "
-")
+	lines := strings.Split(text, "\n")
 	var result []string
 	inQuote := false
 
@@ -608,8 +573,7 @@ func formatToHTML(text string) string {
 		result = append(result, "</blockquote>")
 	}
 
-	text = strings.Join(result, "
-")
+	text = strings.Join(result, "\n")
 
 	// Bold **text**
 	for strings.Contains(text, "**") {
@@ -674,8 +638,7 @@ func formatToHTML(text string) string {
 		}
 		endIdx += idx + 3
 		inner := text[idx+3 : endIdx]
-		if nl := strings.Index(inner, "
-"); nl > 0 && nl < 20 {
+		if nl := strings.Index(inner, "\n"); nl > 0 && nl < 20 {
 			inner = inner[nl+1:]
 		}
 		text = text[:idx] + "<pre><code>" + inner + "</code></pre>" + text[endIdx+3:]
@@ -689,4 +652,135 @@ func formatNum(n int) string {
 		return fmt.Sprintf("%.1fk", float64(n)/1000)
 	}
 	return fmt.Sprintf("%d", n)
+}
+'''
+
+with open(os.path.join(output_dir, "telegram.go"), "w") as f:
+    f.write(telegram_go)
+print(f"telegram.go: {len(telegram_go)} chars, {telegram_go.count(chr(10))} lines")
+
+# === main.go ===
+main_go = r'''package main
+
+import (
+	"log"
+	"os"
+	"time"
+
+	"github.com/oblachko/xli-bot/internal/agent"
+	"github.com/oblachko/xli-bot/internal/config"
+	"github.com/oblachko/xli-bot/internal/llm"
+	"github.com/oblachko/xli-bot/internal/mcp"
+	"github.com/oblachko/xli-bot/internal/memory"
+	"github.com/oblachko/xli-bot/internal/sandbox"
+	"github.com/oblachko/xli-bot/internal/skills"
+	"github.com/oblachko/xli-bot/internal/transport"
+)
+
+func main() {
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Printf("Config loaded: Telegram token len=%d, LLM provider=%s", len(cfg.Telegram.BotToken), cfg.LLM.Provider)
+	if cfg.Telegram.BotToken == "" {
+		log.Fatal("TELEGRAM_BOT_TOKEN is empty!")
+	}
+	if cfg.LLM.APIKey == "" {
+		log.Fatal("LLM_API_KEY is empty!")
+	}
+
+	os.MkdirAll("data", 0755)
+	os.MkdirAll("skills", 0755)
+	os.MkdirAll("mcp_servers", 0755)
+	os.MkdirAll("sandbox", 0755)
+
+	store, err := memory.NewSQLiteStore("data/xli.db")
+	if err != nil {
+		log.Fatal("SQLite failed:", err)
+	}
+	defer store.Close()
+	log.Println("SQLite OK")
+
+	skillRegistry := skills.NewHotLoader()
+	if err := skillRegistry.LoadFromDir("skills"); err != nil {
+		log.Printf("Skills warning: %v", err)
+	}
+	log.Printf("Skills loaded: %d", len(skillRegistry.GetAll()))
+
+	// MCP — регистрация серверов
+	mcpClient := mcp.NewClient()
+
+	mcpServers := []mcp.MCPServer{
+		{Name: "debugger", Script: "./mcp_servers/mcp-debugger-cli.py", Enabled: true},
+		{Name: "knowledge", Script: "./mcp_servers/mcp-knowledge-cli.py", Enabled: true},
+		{Name: "package-monitor", Script: "./mcp_servers/mcp-package-monitor-cli.py", Enabled: true},
+		{Name: "shell-helper", Script: "./mcp_servers/mcp-shell-helper-cli.py", Enabled: true},
+		{Name: "prompt-cli", Script: "./mcp_servers/prompt-cli.py", Enabled: true},
+		{Name: "archaeologist", Script: "./mcp_servers/archaeologist_cli.py", Enabled: true},
+		{Name: "refactor", Script: "./mcp_servers/refactor_cli.py", Enabled: true},
+		{Name: "architecture", Script: "./mcp_servers/architecture_cli.py", Enabled: true},
+		{Name: "auto-tester", Script: "./mcp_servers/mcp-auto-tester-cli.py", Enabled: true},
+	}
+
+	for _, srv := range mcpServers {
+		if err := mcpClient.Register(srv); err != nil {
+			log.Printf("MCP register error %s: %v", srv.Name, err)
+		} else {
+			log.Printf("MCP registered: %s", srv.Name)
+		}
+	}
+
+	autoServers, err := mcp.AutoDiscover("mcp_servers")
+	if err != nil {
+		log.Printf("MCP autodiscover warning: %v", err)
+	} else {
+		for _, srv := range autoServers {
+			if err := mcpClient.Register(srv); err != nil {
+				log.Printf("MCP autodiscover register error %s: %v", srv.Name, err)
+			}
+		}
+	}
+
+	log.Printf("MCP servers: %d registered (lazy load)", len(mcpClient.GetServerNames()))
+
+	llmClient := llm.NewMistralClient(cfg.LLM.APIKey, cfg.LLM.Provider)
+	log.Println("LLM client created")
+
+	tg, err := transport.NewTelegram(cfg.Telegram.BotToken, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Println("Telegram transport created")
+
+	sbx, _ := sandbox.NewSandbox("sandbox")
+	executor := agent.NewToolExecutor(tg, sbx)
+	botAgent := agent.NewAgent(llmClient, store, executor, skillRegistry, mcpClient)
+
+	// NEW: Tier Router setup
+	tierRouter := agent.NewTierRouter(llmClient)
+	tierExecutor := agent.NewTierExecutor(botAgent, tierRouter, nil) // orchestrator can be added later
+	botAgent.SetTierExecutor(tierExecutor)
+	log.Println("Tier Router initialized")
+
+	// Optional: Orchestrator for Tier 3
+	orchestrator := agent.NewOrchestrator(botAgent, llmClient)
+	botAgent.SetOrchestrator(orchestrator)
+	tierExecutor.Orchestrator = orchestrator
+	log.Println("Orchestrator initialized")
+
+	tg.SetAgent(botAgent)
+	log.Println("Agent + TierRouter + Orchestrator created")
+
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			mcpClient.CleanupIdle()
+		}
+	}()
+
+	log.Println("XLI Bot v2 with Tier Router started!")
+	tg.Start()
 }
