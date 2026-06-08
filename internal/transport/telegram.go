@@ -82,15 +82,24 @@ func (t *TelegramTransport) handleCommand(msg *tgbotapi.Message) {
 
 	switch msg.Command() {
 	case "start":
-		t.sendHTML(chatID, "<b>XLI Bot</b> started!\n\nUse <code>/oa &lt;query&gt;</code> or just text me.")
+		t.sendHTML(chatID, "<b>XLI Bot</b> started!
+
+Use <code>/oa &lt;query&gt;</code> or just text me.")
 
 	case "help":
-		help := "<b>Commands:</b>\n" +
-			"<code>/oa &lt;query&gt;</code> - ask agent\n" +
-			"<code>/clear</code> - clear memory\n" +
-			"<code>/skills</code> - list skills\n" +
-			"<code>/mcp</code> - MCP status\n" +
-			"<code>/status</code> - bot status\n\n" +
+		help := "<b>Commands:</b>
+" +
+			"<code>/oa &lt;query&gt;</code> - ask agent
+" +
+			"<code>/clear</code> - clear memory
+" +
+			"<code>/skills</code> - list skills
+" +
+			"<code>/mcp</code> - MCP status
+" +
+			"<code>/status</code> - bot status
+
+" +
 			"Just text me - I will respond."
 		t.sendHTML(chatID, help)
 
@@ -99,7 +108,8 @@ func (t *TelegramTransport) handleCommand(msg *tgbotapi.Message) {
 		t.sendHTML(chatID, "<b>Memory cleared!</b>")
 
 	case "status":
-		t.sendHTML(chatID, "Bot running\nSQLite connected")
+		t.sendHTML(chatID, "Bot running
+SQLite connected")
 
 	case "skills":
 		t.handleSkillsCommand(chatID, 0, 0)
@@ -137,7 +147,9 @@ func (t *TelegramTransport) handleSkillsCommand(chatID int64, page int, msgID in
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("<b>Skills:</b> <code>%d total</code>\n\n", total))
+	sb.WriteString(fmt.Sprintf("<b>Skills:</b> <code>%d total</code>
+
+", total))
 
 	for i := start; i < end; i++ {
 		s := all[i]
@@ -148,7 +160,8 @@ func (t *TelegramTransport) handleSkillsCommand(chatID int64, page int, msgID in
 		if s.TriggerMode == "always" {
 			status = "★"
 		}
-		sb.WriteString(fmt.Sprintf("%s <code>%s</code> — <i>%s</i>\n", status, s.Name, s.TriggerMode))
+		sb.WriteString(fmt.Sprintf("%s <code>%s</code> — <i>%s</i>
+", status, s.Name, s.TriggerMode))
 	}
 
 	var rows [][]tgbotapi.InlineKeyboardButton
@@ -196,7 +209,17 @@ func (t *TelegramTransport) handleMCPCommand(chatID int64, page int, msgID int) 
 
 func (t *TelegramTransport) processAgentRequest(chatID int64, text string) {
 	log.Printf("[TG] Agent request: chat=%d, text=%q", chatID, text)
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+
+	// Dynamic timeout: 300s for heavy tasks, 120s default
+	timeout := 120 * time.Second
+	lower := strings.ToLower(text)
+	if strings.Contains(lower, "project") || strings.Contains(lower, "compile") ||
+		strings.Contains(lower, "build") || strings.Contains(lower, "архив") ||
+		strings.Contains(lower, "archive") || len(text) > 200 {
+		timeout = 300 * time.Second
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	thinkMsg, err := t.sendHTML(chatID, "<i>Thinking...</i>")
@@ -213,13 +236,16 @@ func (t *TelegramTransport) processAgentRequest(chatID int64, text string) {
 		return
 	}
 
-	log.Printf("[TG] Agent result: type=%s, tokens=%d, answer=%d chars", result.AgentType, result.TotalTokens, len(result.Answer))
+	log.Printf("[TG] Agent result: type=%s, tokens=%d, answer=%d chars",
+		result.AgentType, result.TotalTokens, len(result.Answer))
 
 	response := formatToHTML(result.Answer)
 
-	// Защита от переполнения
+	// Truncate if too long
 	if len(response) > MaxMessageLength-200 {
-		response = response[:MaxMessageLength-200] + "\n\n<i>... truncated</i>"
+		response = response[:MaxMessageLength-200] + "
+
+<i>... truncated</i>"
 	}
 
 	tokenInfo := fmt.Sprintf("<i>Tokens: in %s out %s total %s</i>",
@@ -227,15 +253,13 @@ func (t *TelegramTransport) processAgentRequest(chatID int64, text string) {
 		formatNum(result.OutputTokens),
 		formatNum(result.TotalTokens))
 
-	fullText := response + "\n\n" + tokenInfo
+	fullText := response + "
+
+" + tokenInfo
 
 	if len(fullText) <= MaxMessageLength {
-		keyboard := tgbotapi.NewInlineKeyboardMarkup(
-			tgbotapi.NewInlineKeyboardRow(
-				tgbotapi.NewInlineKeyboardButtonData("Clear", fmt.Sprintf("action:clear:%d", chatID)),
-				tgbotapi.NewInlineKeyboardButtonData("Regen", fmt.Sprintf("action:regen:%s", text)),
-			),
-		)
+		// Build action buttons based on result
+		keyboard := t.buildActionKeyboard(chatID, text, result)
 		t.editMessageWithKeyboardHTML(chatID, thinkMsg.MessageID, fullText, keyboard)
 		log.Printf("[TG] Short answer edited, done")
 		return
@@ -250,10 +274,37 @@ func (t *TelegramTransport) processAgentRequest(chatID int64, text string) {
 	t.bookPages[bookKey] = pages
 	t.bookMu.Unlock()
 
-	firstPage := pages[0] + fmt.Sprintf("\n\n📄 <i>Page 1/%d</i>\n%s", totalPages, tokenInfo)
+	firstPage := pages[0] + fmt.Sprintf("
+
+📄 <i>Page 1/%d</i>
+%s", totalPages, tokenInfo)
 	keyboard := t.buildBookKeyboard(bookKey, 0, totalPages, chatID, text)
 	t.editMessageWithKeyboardHTML(chatID, thinkMsg.MessageID, firstPage, keyboard)
 	log.Printf("[TG] Book page 1/%d shown", totalPages)
+}
+
+// buildActionKeyboard — кнопки под результатом: [Run] [Download] [Explain] [Clear] [Regen]
+func (t *TelegramTransport) buildActionKeyboard(chatID int64, originalText string, result *agent.AgentResult) tgbotapi.InlineKeyboardMarkup {
+	var rows [][]tgbotapi.InlineKeyboardButton
+
+	// Row 1: Action buttons for code results
+	var actionRow []tgbotapi.InlineKeyboardButton
+	if result.AgentType == "tier2_single" || result.AgentType == "coder" || result.AgentType == "build" {
+		actionRow = append(actionRow, tgbotapi.NewInlineKeyboardButtonData("▶️ Run", fmt.Sprintf("action:run:%d", chatID)))
+		actionRow = append(actionRow, tgbotapi.NewInlineKeyboardButtonData("📦 Download", fmt.Sprintf("action:download:%d", chatID)))
+		actionRow = append(actionRow, tgbotapi.NewInlineKeyboardButtonData("📖 Explain", fmt.Sprintf("action:explain:%s", originalText)))
+	}
+	if len(actionRow) > 0 {
+		rows = append(rows, actionRow)
+	}
+
+	// Row 2: Utility buttons
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("🧹 Clear", fmt.Sprintf("action:clear:%d", chatID)),
+		tgbotapi.NewInlineKeyboardButtonData("🔃 Regen", fmt.Sprintf("action:regen:%s", originalText)),
+	))
+
+	return tgbotapi.NewInlineKeyboardMarkup(rows...)
 }
 
 func (t *TelegramTransport) buildBookKeyboard(bookKey string, currentPage, totalPages int, chatID int64, originalText string) tgbotapi.InlineKeyboardMarkup {
@@ -261,7 +312,6 @@ func (t *TelegramTransport) buildBookKeyboard(bookKey string, currentPage, total
 
 	var navRow []tgbotapi.InlineKeyboardButton
 	if currentPage > 0 {
-		// ФИКС: разделитель | вместо :
 		navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData("◀ Prev", fmt.Sprintf("book|%s|%d", bookKey, currentPage-1)))
 	}
 	navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("%d/%d", currentPage+1, totalPages), "noop"))
@@ -273,8 +323,8 @@ func (t *TelegramTransport) buildBookKeyboard(bookKey string, currentPage, total
 	}
 
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonData("Clear", fmt.Sprintf("action:clear:%d", chatID)),
-		tgbotapi.NewInlineKeyboardButtonData("Regen", fmt.Sprintf("action:regen:%s", originalText)),
+		tgbotapi.NewInlineKeyboardButtonData("🧹 Clear", fmt.Sprintf("action:clear:%d", chatID)),
+		tgbotapi.NewInlineKeyboardButtonData("🔃 Regen", fmt.Sprintf("action:regen:%s", originalText)),
 	))
 
 	return tgbotapi.NewInlineKeyboardMarkup(rows...)
@@ -284,11 +334,14 @@ func (t *TelegramTransport) splitIntoPages(text string, maxLen int) []string {
 	var pages []string
 	var currentPage strings.Builder
 
-	paragraphs := strings.Split(text, "\n\n")
+	paragraphs := strings.Split(text, "
+
+")
 
 	for _, para := range paragraphs {
 		if len(para) > maxLen {
-			lines := strings.Split(para, "\n")
+			lines := strings.Split(para, "
+")
 			for _, line := range lines {
 				if currentPage.Len()+len(line)+1 > maxLen {
 					if currentPage.Len() > 0 {
@@ -297,7 +350,8 @@ func (t *TelegramTransport) splitIntoPages(text string, maxLen int) []string {
 					}
 				}
 				if currentPage.Len() > 0 {
-					currentPage.WriteString("\n")
+					currentPage.WriteString("
+")
 				}
 				currentPage.WriteString(line)
 			}
@@ -312,7 +366,9 @@ func (t *TelegramTransport) splitIntoPages(text string, maxLen int) []string {
 		}
 
 		if currentPage.Len() > 0 {
-			currentPage.WriteString("\n\n")
+			currentPage.WriteString("
+
+")
 		}
 		currentPage.WriteString(para)
 	}
@@ -330,7 +386,7 @@ func (t *TelegramTransport) handleCallback(query *tgbotapi.CallbackQuery) {
 	data := query.Data
 	log.Printf("[TG] Callback: chat=%d data=%q", chatID, data)
 
-	// ФИКС: book использует | вместо :
+	// Book pagination
 	if strings.HasPrefix(data, "book|") {
 		parts := strings.Split(data, "|")
 		if len(parts) >= 3 {
@@ -343,7 +399,9 @@ func (t *TelegramTransport) handleCallback(query *tgbotapi.CallbackQuery) {
 
 			if ok && pageNum >= 0 && pageNum < len(pages) {
 				keyboard := t.buildBookKeyboard(bookKey, pageNum, len(pages), chatID, "")
-				pageText := pages[pageNum] + fmt.Sprintf("\n\n📄 <i>Page %d/%d</i>", pageNum+1, len(pages))
+				pageText := pages[pageNum] + fmt.Sprintf("
+
+📄 <i>Page %d/%d</i>", pageNum+1, len(pages))
 				t.editMessageWithKeyboardHTML(chatID, msgID, pageText, keyboard)
 			}
 		}
@@ -372,15 +430,36 @@ func (t *TelegramTransport) handleCallback(query *tgbotapi.CallbackQuery) {
 		}
 
 	case "action":
+		if len(parts) < 2 {
+			break
+		}
 		switch parts[1] {
 		case "clear":
-			t.agent.Memory.ClearHistory(chatID)
-			t.editHTML(chatID, msgID, "<b>Memory cleared!</b>")
+			if len(parts) >= 3 {
+				cid, _ := strconv.ParseInt(parts[2], 10, 64)
+				t.agent.Memory.ClearHistory(cid)
+				t.editHTML(chatID, msgID, "<b>Memory cleared!</b>")
+			}
 		case "regen":
 			if len(parts) >= 3 {
 				originalText := strings.Join(parts[2:], ":")
 				t.bot.Request(tgbotapi.NewDeleteMessage(chatID, msgID))
 				t.processAgentRequest(chatID, originalText)
+			}
+		case "run":
+			// Placeholder: run last code
+			t.bot.Request(tgbotapi.NewCallback(query.ID, "Run triggered"))
+			return
+		case "download":
+			// Placeholder: download last archive
+			t.bot.Request(tgbotapi.NewCallback(query.ID, "Download triggered"))
+			return
+		case "explain":
+			if len(parts) >= 3 {
+				originalText := strings.Join(parts[2:], ":")
+				explainQuery := "Explain this code in detail: " + originalText
+				t.bot.Request(tgbotapi.NewDeleteMessage(chatID, msgID))
+				t.processAgentRequest(chatID, explainQuery)
 			}
 		}
 
@@ -411,7 +490,13 @@ func (t *TelegramTransport) ShowConfirmation(chatID int64, msgID int, toolName s
 	t.mu.Unlock()
 
 	argsStr := formatArgsHTML(args)
-	text := fmt.Sprintf("<b>Confirm action:</b>\n\n<b>Tool:</b> <code>%s</code>\n<b>Args:</b>\n%s\n\nExecute?", toolName, argsStr)
+	text := fmt.Sprintf("<b>Confirm action:</b>
+
+<b>Tool:</b> <code>%s</code>
+<b>Args:</b>
+%s
+
+Execute?", toolName, argsStr)
 
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
@@ -441,7 +526,8 @@ func formatArgsHTML(args map[string]interface{}) string {
 	for k, v := range args {
 		parts = append(parts, fmt.Sprintf("  - <b>%s:</b> <code>%v</code>", k, v))
 	}
-	return strings.Join(parts, "\n")
+	return strings.Join(parts, "
+")
 }
 
 func (t *TelegramTransport) SendFileBytes(chatID int64, name string, data []byte, caption string) error {
@@ -494,10 +580,9 @@ func (t *TelegramTransport) editMessageWithKeyboardHTML(chatID int64, msgID int,
 	t.bot.Request(edit)
 }
 
-// formatToHTML — ФИКС: blockquote expandable + защита от дублирования
 func formatToHTML(text string) string {
-	// Сначала обрабатываем blockquote (> текст)
-	lines := strings.Split(text, "\n")
+	lines := strings.Split(text, "
+")
 	var result []string
 	inQuote := false
 
@@ -505,7 +590,6 @@ func formatToHTML(text string) string {
 		trimmed := strings.TrimLeft(line, " ")
 		if strings.HasPrefix(trimmed, "> ") || strings.HasPrefix(trimmed, ">>") {
 			if !inQuote {
-				// ФИКС: expandable blockquote для сворачивания
 				result = append(result, "<blockquote expandable>")
 				inQuote = true
 			}
@@ -524,7 +608,8 @@ func formatToHTML(text string) string {
 		result = append(result, "</blockquote>")
 	}
 
-	text = strings.Join(result, "\n")
+	text = strings.Join(result, "
+")
 
 	// Bold **text**
 	for strings.Contains(text, "**") {
@@ -589,7 +674,8 @@ func formatToHTML(text string) string {
 		}
 		endIdx += idx + 3
 		inner := text[idx+3 : endIdx]
-		if nl := strings.Index(inner, "\n"); nl > 0 && nl < 20 {
+		if nl := strings.Index(inner, "
+"); nl > 0 && nl < 20 {
 			inner = inner[nl+1:]
 		}
 		text = text[:idx] + "<pre><code>" + inner + "</code></pre>" + text[endIdx+3:]
