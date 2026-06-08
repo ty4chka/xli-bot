@@ -90,8 +90,7 @@ func (te *ToolExecutor) terminalRun(ctx context.Context, chatID int64, msgID int
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		log.Printf("[TOOL] terminal.run error: %v, output: %d chars", err, len(output))
-		return fmt.Sprintf("Error: %v
-%s", err, string(output)), nil
+		return fmt.Sprintf("Error: %v\n%s", err, string(output)), nil
 	}
 	log.Printf("[TOOL] terminal.run success: %d chars", len(output))
 	return string(output), nil
@@ -157,15 +156,11 @@ func (te *ToolExecutor) fileWrite(ctx context.Context, chatID int64, msgID int, 
 		runOutput, runErr := cmd.CombinedOutput()
 		if runErr != nil {
 			log.Printf("[TOOL] Python run error: %v", runErr)
-			return fmt.Sprintf("✅ Written: %s (%d bytes)
-❌ Run error: %v
-%s",
+			return fmt.Sprintf("✅ Written: %s (%d bytes)\n❌ Run error: %v\n%s",
 				path, len(data), runErr, string(runOutput)), nil
 		}
 		log.Printf("[TOOL] Python run success: %d chars", len(runOutput))
-		return fmt.Sprintf("✅ Written: %s (%d bytes)
-✅ Run output:
-%s",
+		return fmt.Sprintf("✅ Written: %s (%d bytes)\n✅ Run output:\n%s",
 			path, len(data), string(runOutput)), nil
 	}
 
@@ -187,11 +182,8 @@ func (te *ToolExecutor) fileWrite(ctx context.Context, chatID int64, msgID int, 
 			cmd := exec.CommandContext(ctx, "sh", "-c", compileCmd)
 			compileOutput, compileErr := cmd.CombinedOutput()
 			if compileErr != nil {
-				log.Printf("[TOOL] Compile error: %v
-%s", compileErr, string(compileOutput))
-				return fmt.Sprintf("✅ Written: %s (%d bytes)
-❌ Compile error: %v
-%s",
+				log.Printf("[TOOL] Compile error: %v\n%s", compileErr, string(compileOutput))
+				return fmt.Sprintf("✅ Written: %s (%d bytes)\n❌ Compile error: %v\n%s",
 					path, len(data), compileErr, string(compileOutput)), nil
 			}
 
@@ -206,9 +198,7 @@ func (te *ToolExecutor) fileWrite(ctx context.Context, chatID int64, msgID int, 
 				}
 			}
 
-			return fmt.Sprintf("✅ Written: %s (%d bytes)
-✅ Compiled: %s
-%s",
+			return fmt.Sprintf("✅ Written: %s (%d bytes)\n✅ Compiled: %s\n%s",
 				path, len(data), binName, string(compileOutput)), nil
 		}
 	}
@@ -231,7 +221,7 @@ func (te *ToolExecutor) archiveCreate(ctx context.Context, chatID int64, msgID i
 		archiveName += ".zip"
 	}
 
-	log.Printf("[TOOL] archive.create: %s → %s", sourcePath, archiveName)
+	log.Printf("[TOOL] archive.create: %s -> %s", sourcePath, archiveName)
 
 	if _, err := os.Stat(sourcePath); os.IsNotExist(err) {
 		return "", fmt.Errorf("source not found: %s", sourcePath)
@@ -346,8 +336,7 @@ func (te *ToolExecutor) sandboxRun(ctx context.Context, chatID int64, msgID int,
 	}
 
 	if runErr != nil {
-		return fmt.Sprintf("Sandbox error: %v
-%s", runErr, output), nil
+		return fmt.Sprintf("Sandbox error: %v\n%s", runErr, output), nil
 	}
 	return output, nil
 }
