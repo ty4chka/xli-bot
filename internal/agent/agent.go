@@ -1,786 +1,277 @@
-
-package transport
+package agent
 
 import (
 	"context"
 	"fmt"
-	"html"
 	"log"
-	"strconv"
 	"strings"
-	"sync"
-	"time"
 
-	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
-
-	"github.com/oblachko/xli-bot/internal/agent"
-)
-
-const (
-	MaxMessageLength = 4000
-	PageSize         = 3500
-)
-
-type TelegramTransport struct {
-	bot           *tgbotapi.BotAPI
-	agent         *agent.Agent
-	confirmations map[string]chan bool
-	mu            sync.RWMutex
-	bookPages     map[string][]string
-	bookMu        sync.RWMutex
-}
-
-func NewTelegram(token string, a *agent.Agent) (*TelegramTransport, error) {
-	bot, err := tgbotapi.NewBotAPI(token)
-	if err != nil {
-		return nil, err
-	}
-
-	return &TelegramTransport{
-		bot:           bot,
-		agent:         a,
-		confirmations: make(map[string]chan bool),
-		bookPages:     make(map[string][]string),
-	}, nil
-}
-
-func (t *TelegramTransport) SetAgent(a *agent.Agent) {
-	t.agent = a
-}
-
-func (t *TelegramTransport) Start() {
-	u := tgbotapi.NewUpdate(0)
-	u.Timeout = 60
-
-	updates := t.bot.GetUpdatesChan(u)
-	log.Printf("[TG] Bot @%s started", t.bot.Self.UserName)
-
-	for update := range updates {
-		if update.Message != nil {
-			go t.handleMessage(update.Message)
-		}
-		if update.CallbackQuery != nil {
-			go t.handleCallback(update.CallbackQuery)
-		}
-	}
-}
-
-func (t *TelegramTransport) handleMessage(msg *tgbotapi.Message) {
-	chatID := msg.Chat.ID
-	log.Printf("[TG] Message: chat=%d text=%q", chatID, msg.Text)
-
-	if msg.IsCommand() {
-		t.handleCommand(msg)
-		return
-	}
-
-	t.processAgentRequest(chatID, msg.Text)
-}
-
-func (t *TelegramTransport) handleCommand(msg *tgbotapi.Message) {
-	chatID := msg.Chat.ID
-	log.Printf("[TG] Command: chat=%d cmd=%s", chatID, msg.Command())
-
-	switch msg.Command() {
-	case "start":
-		t.sendHTML(chatID, "<b>XLI Bot</b> started!\n\nUse <code>/oa &lt;query&gt;</code> or just text me.")
-
-	case "help":
-		help := "<b>Commands:</b>\n" +
-			"<code>/oa &lt;query&gt;</code> - ask agent\n" +
-			"<code>/clear</code> - clear memory\n" +
-			"<code>/skills</code> - list skills\n" +
-			"<code>/mcp</code> - MCP status\n" +
-			"<code>/status</code> - bot status\n\n" +
-			"Just text me - I will respond."
-		t.sendHTML(chatID, help)
-
-	case "clear":
-		t.agent.Memory.ClearHistory(chatID)
-		t.sendHTML(chatID, "<b>Memory cleared!</b>")
-
-	case "status":
-		t.sendHTML(chatID, "Bot running\nSQLite connected")
-
-	case "skills":
-		t.handleSkillsCommand(chatID, 0, 0)
-
-	case "mcp":
-		t.handleMCPCommand(chatID, 0, 0)
-
-	case "oa":
-		query := msg.CommandArguments()
-		if query == "" {
-			t.sendHTML(chatID, "Usage: <code>/oa write Go code</code>")
-			return
-		}
-		t.processAgentRequest(chatID, query)
-
-	default:
-		t.sendHTML(chatID, "Unknown command. Use <code>/help</code>")
-	}
-}
-
-func (t *TelegramTransport) handleSkillsCommand(chatID int64, page int, msgID int) {
-	all := t.agent.Skills.GetAll()
-	active := t.agent.Skills.GetActive()
-	activeMap := make(map[string]bool)
-	for _, a := range active {
-		activeMap[a.Name] = true
-	}
-
-	perPage := 5
-	total := len(all)
-	start := page * perPage
-	end := start + perPage
-	if end > total {
-		end = total
-	}
-
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("<b>Skills:</b> <code>%d total</code>\n\n", total))
-
-	for i := start; i < end; i++ {
-		s := all[i]
-		status := "○"
-		if activeMap[s.Name] {
-			status = "●"
-		}
-		if s.TriggerMode == "always" {
-			status = "★"
-		}
-		sb.WriteString(fmt.Sprintf("%s <code>%s</code> — <i>%s</i>\n", status, s.Name, s.TriggerMode))
-	}
-
-	var rows [][]tgbotapi.InlineKeyboardButton
-	var currentRow []tgbotapi.InlineKeyboardButton
-
-	if page > 0 {
-		currentRow = append(currentRow, tgbotapi.NewInlineKeyboardButtonData("◀ Prev", fmt.Sprintf("page:skills:%d", page-1)))
-	}
-	if end < total {
-		currentRow = append(currentRow, tgbotapi.NewInlineKeyboardButtonData("Next ▶", fmt.Sprintf("page:skills:%d", page+1)))
-	}
-	if len(currentRow) > 0 {
-		rows = append(rows, currentRow)
-	}
-
-	if msgID == 0 {
-		if len(rows) > 0 {
-			keyboard := tgbotapi.NewInlineKeyboardMarkup(rows...)
-			t.sendMessageWithKeyboardHTML(chatID, sb.String(), keyboard)
-		} else {
-			t.sendHTML(chatID, sb.String())
-		}
-	} else {
-		edit := tgbotapi.NewEditMessageText(chatID, msgID, sb.String())
-		edit.ParseMode = tgbotapi.ModeHTML
-		if len(rows) > 0 {
-			keyboard := tgbotapi.NewInlineKeyboardMarkup(rows...)
-			edit.ReplyMarkup = &keyboard
-		}
-		t.bot.Request(edit)
-	}
-}
-
-func (t *TelegramTransport) handleMCPCommand(chatID int64, page int, msgID int) {
-	status := t.agent.MCP.Status()
-
-	if msgID == 0 {
-		t.sendHTML(chatID, status)
-	} else {
-		edit := tgbotapi.NewEditMessageText(chatID, msgID, status)
-		edit.ParseMode = tgbotapi.ModeHTML
-		t.bot.Request(edit)
-	}
-}
-
-func (t *TelegramTransport) processAgentRequest(chatID int64, text string) {
-	log.Printf("[TG] Agent request: chat=%d, text=%q", chatID, text)
-
-	// Dynamic timeout: 300s for heavy tasks, 120s default
-	timeout := 120 * time.Second
-	lower := strings.ToLower(text)
-	if strings.Contains(lower, "project") || strings.Contains(lower, "compile") ||
-		strings.Contains(lower, "build") || strings.Contains(lower, "архив") ||
-		strings.Contains(lower, "archive") || len(text) > 200 {
-		timeout = 300 * time.Second
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	thinkMsg, err := t.sendHTML(chatID, "<i>Thinking...</i>")
-	if err != nil {
-		log.Printf("[TG] ERROR send thinking: %v", err)
-		return
-	}
-	log.Printf("[TG] Thinking msg=%d", thinkMsg.MessageID)
-
-	result, err := t.agent.Run(ctx, chatID, text)
-	if err != nil {
-		log.Printf("[TG] ERROR agent run: %v", err)
-		t.editHTML(chatID, thinkMsg.MessageID, "<b>Error:</b> "+html.EscapeString(err.Error()))
-		return
-	}
-
-	log.Printf("[TG] Agent result: type=%s, tokens=%d, answer=%d chars",
-		result.AgentType, result.TotalTokens, len(result.Answer))
-
-	response := formatToHTML(result.Answer)
-
-	// Truncate if too long
-	if len(response) > MaxMessageLength-200 {
-		response = response[:MaxMessageLength-200] + "\n\n<i>... truncated</i>"
-	}
-
-	tokenInfo := fmt.Sprintf("<i>Tokens: in %s out %s total %s</i>",
-		formatNum(result.InputTokens),
-		formatNum(result.OutputTokens),
-		formatNum(result.TotalTokens))
-
-	fullText := response + "\n\n" + tokenInfo
-
-	if len(fullText) <= MaxMessageLength {
-		// Build action buttons based on result
-		keyboard := t.buildActionKeyboard(chatID, text, result)
-		t.editMessageWithKeyboardHTML(chatID, thinkMsg.MessageID, fullText, keyboard)
-		log.Printf("[TG] Short answer edited, done")
-		return
-	}
-
-	pages := t.splitIntoPages(response, PageSize)
-	totalPages := len(pages)
-	log.Printf("[TG] Book mode: %d pages", totalPages)
-
-	bookKey := fmt.Sprintf("%d_%d", chatID, thinkMsg.MessageID)
-	t.bookMu.Lock()
-	t.bookPages[bookKey] = pages
-	t.bookMu.Unlock()
-
-	firstPage := pages[0] + fmt.Sprintf("\n\n📄 <i>Page 1/%d</i>\n%s", totalPages, tokenInfo)
-	keyboard := t.buildBookKeyboard(bookKey, 0, totalPages, chatID, text)
-	t.editMessageWithKeyboardHTML(chatID, thinkMsg.MessageID, firstPage, keyboard)
-	log.Printf("[TG] Book page 1/%d shown", totalPages)
-}
-
-// buildActionKeyboard — кнопки под результатом: [Run] [Download] [Explain] [Clear] [Regen]
-func (t *TelegramTransport) buildActionKeyboard(chatID int64, originalText string, result *agent.AgentResult) tgbotapi.InlineKeyboardMarkup {
-	var rows [][]tgbotapi.InlineKeyboardButton
-
-	// Row 1: Action buttons for code results
-	var actionRow []tgbotapi.InlineKeyboardButton
-	if result.AgentType == "tier2_single" || result.AgentType == "coder" || result.AgentType == "build" {
-		actionRow = append(actionRow, tgbotapi.NewInlineKeyboardButtonData("▶️ Run", fmt.Sprintf("action:run:%d", chatID)))
-		actionRow = append(actionRow, tgbotapi.NewInlineKeyboardButtonData("📦 Download", fmt.Sprintf("action:download:%d", chatID)))
-		actionRow = append(actionRow, tgbotapi.NewInlineKeyboardButtonData("📖 Explain", fmt.Sprintf("action:explain:%s", originalText)))
-	}
-	if len(actionRow) > 0 {
-		rows = append(rows, actionRow)
-	}
-
-	// Row 2: Utility buttons
-	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonData("🧹 Clear", fmt.Sprintf("action:clear:%d", chatID)),
-		tgbotapi.NewInlineKeyboardButtonData("🔃 Regen", fmt.Sprintf("action:regen:%s", originalText)),
-	))
-
-	return tgbotapi.NewInlineKeyboardMarkup(rows...)
-}
-
-func (t *TelegramTransport) buildBookKeyboard(bookKey string, currentPage, totalPages int, chatID int64, originalText string) tgbotapi.InlineKeyboardMarkup {
-	var rows [][]tgbotapi.InlineKeyboardButton
-
-	var navRow []tgbotapi.InlineKeyboardButton
-	if currentPage > 0 {
-		navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData("◀ Prev", fmt.Sprintf("book|%s|%d", bookKey, currentPage-1)))
-	}
-	navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("%d/%d", currentPage+1, totalPages), "noop"))
-	if currentPage < totalPages-1 {
-		navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData("Next ▶", fmt.Sprintf("book|%s|%d", bookKey, currentPage+1)))
-	}
-	if len(navRow) > 0 {
-		rows = append(rows, navRow)
-	}
-
-	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonData("🧹 Clear", fmt.Sprintf("action:clear:%d", chatID)),
-		tgbotapi.NewInlineKeyboardButtonData("🔃 Regen", fmt.Sprintf("action:regen:%s", originalText)),
-	))
-
-	return tgbotapi.NewInlineKeyboardMarkup(rows...)
-}
-
-func (t *TelegramTransport) splitIntoPages(text string, maxLen int) []string {
-	var pages []string
-	var currentPage strings.Builder
-
-	paragraphs := strings.Split(text, "\n\n")
-
-	for _, para := range paragraphs {
-		if len(para) > maxLen {
-			lines := strings.Split(para, "\n")
-			for _, line := range lines {
-				if currentPage.Len()+len(line)+1 > maxLen {
-					if currentPage.Len() > 0 {
-						pages = append(pages, currentPage.String())
-						currentPage.Reset()
-					}
-				}
-				if currentPage.Len() > 0 {
-					currentPage.WriteString("\n")
-				}
-				currentPage.WriteString(line)
-			}
-			continue
-		}
-
-		if currentPage.Len()+len(para)+2 > maxLen {
-			if currentPage.Len() > 0 {
-				pages = append(pages, currentPage.String())
-				currentPage.Reset()
-			}
-		}
-
-		if currentPage.Len() > 0 {
-			currentPage.WriteString("\n\n")
-		}
-		currentPage.WriteString(para)
-	}
-
-	if currentPage.Len() > 0 {
-		pages = append(pages, currentPage.String())
-	}
-
-	return pages
-}
-
-func (t *TelegramTransport) handleCallback(query *tgbotapi.CallbackQuery) {
-	chatID := query.Message.Chat.ID
-	msgID := query.Message.MessageID
-	data := query.Data
-	log.Printf("[TG] Callback: chat=%d data=%q", chatID, data)
-
-	// Book pagination
-	if strings.HasPrefix(data, "book|") {
-		parts := strings.Split(data, "|")
-		if len(parts) >= 3 {
-			bookKey := parts[1]
-			pageNum, _ := strconv.Atoi(parts[2])
-
-			t.bookMu.RLock()
-			pages, ok := t.bookPages[bookKey]
-			t.bookMu.RUnlock()
-
-			if ok && pageNum >= 0 && pageNum < len(pages) {
-				keyboard := t.buildBookKeyboard(bookKey, pageNum, len(pages), chatID, "")
-				pageText := pages[pageNum] + fmt.Sprintf("\n\n📄 <i>Page %d/%d</i>", pageNum+1, len(pages))
-				t.editMessageWithKeyboardHTML(chatID, msgID, pageText, keyboard)
-			}
-		}
-		t.bot.Request(tgbotapi.NewCallback(query.ID, ""))
-		return
-	}
-
-	parts := strings.Split(data, ":")
-	if len(parts) < 2 {
-		t.bot.Request(tgbotapi.NewCallback(query.ID, ""))
-		return
-	}
-
-	switch parts[0] {
-	case "confirm":
-		if len(parts) >= 3 {
-			token := parts[2]
-			approved := parts[1] == "yes"
-			t.mu.RLock()
-			ch, ok := t.confirmations[token]
-			t.mu.RUnlock()
-			if ok {
-				ch <- approved
-			}
-			t.editHTML(chatID, msgID, query.Message.Text)
-		}
-
-	case "action":
-		if len(parts) < 2 {
-			break
-		}
-		switch parts[1] {
-		case "clear":
-			if len(parts) >= 3 {
-				cid, _ := strconv.ParseInt(parts[2], 10, 64)
-				t.agent.Memory.ClearHistory(cid)
-				t.editHTML(chatID, msgID, "<b>Memory cleared!</b>")
-			}
-		case "regen":
-			if len(parts) >= 3 {
-				originalText := strings.Join(parts[2:], ":")
-				t.bot.Request(tgbotapi.NewDeleteMessage(chatID, msgID))
-				t.processAgentRequest(chatID, originalText)
-			}
-		case "run":
-			// Placeholder: run last code
-			t.bot.Request(tgbotapi.NewCallback(query.ID, "Run triggered"))
-			return
-		case "download":
-			// Placeholder: download last archive
-			t.bot.Request(tgbotapi.NewCallback(query.ID, "Download triggered"))
-			return
-		case "explain":
-			if len(parts) >= 3 {
-				originalText := strings.Join(parts[2:], ":")
-				explainQuery := "Explain this code in detail: " + originalText
-				t.bot.Request(tgbotapi.NewDeleteMessage(chatID, msgID))
-				t.processAgentRequest(chatID, explainQuery)
-			}
-		}
-
-	case "page":
-		if len(parts) >= 3 {
-			page, _ := strconv.Atoi(parts[2])
-			switch parts[1] {
-			case "skills":
-				t.handleSkillsCommand(chatID, page, msgID)
-			case "mcp":
-				t.handleMCPCommand(chatID, page, msgID)
-			}
-		}
-
-	case "noop":
-		t.bot.Request(tgbotapi.NewCallback(query.ID, ""))
-		return
-	}
-
-	t.bot.Request(tgbotapi.NewCallback(query.ID, ""))
-}
-
-func (t *TelegramTransport) ShowConfirmation(chatID int64, msgID int, toolName string, args map[string]interface{}) (bool, error) {
-	token := fmt.Sprintf("confirm_%d_%d", chatID, time.Now().UnixNano())
-
-	t.mu.Lock()
-	t.confirmations[token] = make(chan bool, 1)
-	t.mu.Unlock()
-
-	argsStr := formatArgsHTML(args)
-	text := fmt.Sprintf("<b>Confirm action:</b>\n\n<b>Tool:</b> <code>%s</code>\n<b>Args:</b>\n%s\n\nExecute?", toolName, argsStr)
-
-	keyboard := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("Yes", fmt.Sprintf("confirm:yes:%s", token)),
-			tgbotapi.NewInlineKeyboardButtonData("No", fmt.Sprintf("confirm:no:%s", token)),
-		),
-	)
-
-	t.editMessageWithKeyboardHTML(chatID, msgID, text, keyboard)
-
-	select {
-	case approved := <-t.confirmations[token]:
-		t.mu.Lock()
-		delete(t.confirmations, token)
-		t.mu.Unlock()
-		return approved, nil
-	case <-time.After(60 * time.Second):
-		t.mu.Lock()
-		delete(t.confirmations, token)
-		t.mu.Unlock()
-		return false, fmt.Errorf("timeout")
-	}
-}
-
-func formatArgsHTML(args map[string]interface{}) string {
-	var parts []string
-	for k, v := range args {
-		parts = append(parts, fmt.Sprintf("  - <b>%s:</b> <code>%v</code>", k, v))
-	}
-	return strings.Join(parts, "\n")
-}
-
-func (t *TelegramTransport) SendFileBytes(chatID int64, name string, data []byte, caption string) error {
-	log.Printf("[TG] Sending file: %s (%d bytes) to chat=%d", name, len(data), chatID)
-
-	fileBytes := tgbotapi.FileBytes{
-		Name:  name,
-		Bytes: data,
-	}
-
-	file := tgbotapi.NewDocument(chatID, fileBytes)
-	if caption != "" {
-		file.Caption = caption
-		file.ParseMode = tgbotapi.ModeHTML
-	}
-
-	sentMsg, err := t.bot.Send(file)
-	if err != nil {
-		log.Printf("[TG] ERROR SendFileBytes: %v", err)
-		return err
-	}
-
-	log.Printf("[TG] File sent: msg_id=%d, file=%s", sentMsg.MessageID, name)
-	return nil
-}
-
-func (t *TelegramTransport) sendHTML(chatID int64, text string) (tgbotapi.Message, error) {
-	msg := tgbotapi.NewMessage(chatID, text)
-	msg.ParseMode = tgbotapi.ModeHTML
-	return t.bot.Send(msg)
-}
-
-func (t *TelegramTransport) sendMessageWithKeyboardHTML(chatID int64, text string, keyboard tgbotapi.InlineKeyboardMarkup) (tgbotapi.Message, error) {
-	msg := tgbotapi.NewMessage(chatID, text)
-	msg.ParseMode = tgbotapi.ModeHTML
-	msg.ReplyMarkup = keyboard
-	return t.bot.Send(msg)
-}
-
-func (t *TelegramTransport) editHTML(chatID int64, msgID int, text string) {
-	edit := tgbotapi.NewEditMessageText(chatID, msgID, text)
-	edit.ParseMode = tgbotapi.ModeHTML
-	t.bot.Request(edit)
-}
-
-func (t *TelegramTransport) editMessageWithKeyboardHTML(chatID int64, msgID int, text string, keyboard tgbotapi.InlineKeyboardMarkup) {
-	edit := tgbotapi.NewEditMessageText(chatID, msgID, text)
-	edit.ParseMode = tgbotapi.ModeHTML
-	edit.ReplyMarkup = &keyboard
-	t.bot.Request(edit)
-}
-
-func formatToHTML(text string) string {
-	lines := strings.Split(text, "\n")
-	var result []string
-	inQuote := false
-
-	for _, line := range lines {
-		trimmed := strings.TrimLeft(line, " ")
-		if strings.HasPrefix(trimmed, "> ") || strings.HasPrefix(trimmed, ">>") {
-			if !inQuote {
-				result = append(result, "<blockquote expandable>")
-				inQuote = true
-			}
-			quoteText := strings.TrimPrefix(trimmed, "> ")
-			quoteText = strings.TrimPrefix(quoteText, ">>")
-			result = append(result, html.EscapeString(quoteText))
-		} else {
-			if inQuote {
-				result = append(result, "</blockquote>")
-				inQuote = false
-			}
-			result = append(result, html.EscapeString(line))
-		}
-	}
-	if inQuote {
-		result = append(result, "</blockquote>")
-	}
-
-	text = strings.Join(result, "\n")
-
-	// Bold **text**
-	for strings.Contains(text, "**") {
-		idx := strings.Index(text, "**")
-		if idx == -1 {
-			break
-		}
-		endIdx := strings.Index(text[idx+2:], "**")
-		if endIdx == -1 {
-			break
-		}
-		endIdx += idx + 2
-		inner := text[idx+2 : endIdx]
-		text = text[:idx] + "<b>" + inner + "</b>" + text[endIdx+2:]
-	}
-
-	// Italic *text*
-	for strings.Contains(text, "*") {
-		idx := strings.Index(text, "*")
-		if idx == -1 || idx+1 >= len(text) {
-			break
-		}
-		if text[idx+1] == '*' {
-			continue
-		}
-		endIdx := strings.Index(text[idx+1:], "*")
-		if endIdx == -1 {
-			break
-		}
-		endIdx += idx + 1
-		inner := text[idx+1 : endIdx]
-		text = text[:idx] + "<i>" + inner + "</i>" + text[endIdx+1:]
-	}
-
-	// Code `text`
-	for strings.Contains(text, "`") {
-		idx := strings.Index(text, "`")
-		if idx == -1 {
-			break
-		}
-		if idx+1 < len(text) && text[idx+1] == '`' {
-			continue
-		}
-		endIdx := strings.Index(text[idx+1:], "`")
-		if endIdx == -1 {
-			break
-		}
-		endIdx += idx + 1
-		inner := text[idx+1 : endIdx]
-		text = text[:idx] + "<code>" + inner + "</code>" + text[endIdx+1:]
-	}
-
-	// Code blocks ```text```
-	for strings.Contains(text, "```") {
-		idx := strings.Index(text, "```")
-		if idx == -1 {
-			break
-		}
-		endIdx := strings.Index(text[idx+3:], "```")
-		if endIdx == -1 {
-			break
-		}
-		endIdx += idx + 3
-		inner := text[idx+3 : endIdx]
-		if nl := strings.Index(inner, "\n"); nl > 0 && nl < 20 {
-			inner = inner[nl+1:]
-		}
-		text = text[:idx] + "<pre><code>" + inner + "</code></pre>" + text[endIdx+3:]
-	}
-
-	return text
-}
-
-func formatNum(n int) string {
-	if n >= 1000 {
-		return fmt.Sprintf("%.1fk", float64(n)/1000)
-	}
-	return fmt.Sprintf("%d", n)
-}
-'''
-
-with open(os.path.join(output_dir, "telegram.go"), "w") as f:
-    f.write(telegram_go)
-print(f"telegram.go: {len(telegram_go)} chars, {telegram_go.count(chr(10))} lines")
-
-# === main.go ===
-main_go = r'''package main
-
-import (
-	"log"
-	"os"
-	"time"
-
-	"github.com/oblachko/xli-bot/internal/agent"
-	"github.com/oblachko/xli-bot/internal/config"
 	"github.com/oblachko/xli-bot/internal/llm"
 	"github.com/oblachko/xli-bot/internal/mcp"
 	"github.com/oblachko/xli-bot/internal/memory"
-	"github.com/oblachko/xli-bot/internal/sandbox"
 	"github.com/oblachko/xli-bot/internal/skills"
-	"github.com/oblachko/xli-bot/internal/transport"
 )
 
-func main() {
-	cfg, err := config.Load()
-	if err != nil {
-		log.Fatal(err)
+type Agent struct {
+	LLM          llm.Client
+	Memory       memory.Store
+	Executor     *ToolExecutor
+	Skills       skills.Registry
+	MCP          *mcp.Client
+	MaxSteps     int
+	Orchestrator *Orchestrator
+	TierExec     *TierExecutor // NEW: tier router
+}
+
+type AgentResult struct {
+	Answer        string
+	InputTokens   int
+	OutputTokens  int
+	TotalTokens   int
+	ThinkingNotes []string
+	AgentLog      []string
+	AgentType     string
+}
+
+func NewAgent(llmClient llm.Client, store memory.Store, executor *ToolExecutor, skillRegistry skills.Registry, mcpClient *mcp.Client) *Agent {
+	return &Agent{
+		LLM:      llmClient,
+		Memory:   store,
+		Executor: executor,
+		Skills:   skillRegistry,
+		MCP:      mcpClient,
+		MaxSteps: 15,
+	}
+}
+
+func (a *Agent) SetOrchestrator(o *Orchestrator) {
+	a.Orchestrator = o
+}
+
+func (a *Agent) SetTierExecutor(te *TierExecutor) {
+	a.TierExec = te
+}
+
+func (a *Agent) Run(ctx context.Context, chatID int64, task string) (*AgentResult, error) {
+	log.Printf("[AGENT] START task: chat=%d task=%q", chatID, task)
+
+	if a.TierExec != nil {
+		log.Printf("[AGENT] Using TierRouter")
+		return a.TierExec.Run(ctx, chatID, task)
 	}
 
-	log.Printf("Config loaded: Telegram token len=%d, LLM provider=%s", len(cfg.Telegram.BotToken), cfg.LLM.Provider)
-	if cfg.Telegram.BotToken == "" {
-		log.Fatal("TELEGRAM_BOT_TOKEN is empty!")
-	}
-	if cfg.LLM.APIKey == "" {
-		log.Fatal("LLM_API_KEY is empty!")
-	}
-
-	os.MkdirAll("data", 0755)
-	os.MkdirAll("skills", 0755)
-	os.MkdirAll("mcp_servers", 0755)
-	os.MkdirAll("sandbox", 0755)
-
-	store, err := memory.NewSQLiteStore("data/xli.db")
-	if err != nil {
-		log.Fatal("SQLite failed:", err)
-	}
-	defer store.Close()
-	log.Println("SQLite OK")
-
-	skillRegistry := skills.NewHotLoader()
-	if err := skillRegistry.LoadFromDir("skills"); err != nil {
-		log.Printf("Skills warning: %v", err)
-	}
-	log.Printf("Skills loaded: %d", len(skillRegistry.GetAll()))
-
-	// MCP — регистрация серверов
-	mcpClient := mcp.NewClient()
-
-	mcpServers := []mcp.MCPServer{
-		{Name: "debugger", Script: "./mcp_servers/mcp-debugger-cli.py", Enabled: true},
-		{Name: "knowledge", Script: "./mcp_servers/mcp-knowledge-cli.py", Enabled: true},
-		{Name: "package-monitor", Script: "./mcp_servers/mcp-package-monitor-cli.py", Enabled: true},
-		{Name: "shell-helper", Script: "./mcp_servers/mcp-shell-helper-cli.py", Enabled: true},
-		{Name: "prompt-cli", Script: "./mcp_servers/prompt-cli.py", Enabled: true},
-		{Name: "archaeologist", Script: "./mcp_servers/archaeologist_cli.py", Enabled: true},
-		{Name: "refactor", Script: "./mcp_servers/refactor_cli.py", Enabled: true},
-		{Name: "architecture", Script: "./mcp_servers/architecture_cli.py", Enabled: true},
-		{Name: "auto-tester", Script: "./mcp_servers/mcp-auto-tester-cli.py", Enabled: true},
-	}
-
-	for _, srv := range mcpServers {
-		if err := mcpClient.Register(srv); err != nil {
-			log.Printf("MCP register error %s: %v", srv.Name, err)
-		} else {
-			log.Printf("MCP registered: %s", srv.Name)
+	if a.Orchestrator != nil {
+		log.Printf("[AGENT] Using orchestrator")
+		analysis, err := a.Orchestrator.AnalyzeTask(ctx, task)
+		if err == nil && analysis.Confidence > 60 {
+			log.Printf("[AGENT] Orchestrator selected: type=%s confidence=%.0f", analysis.AgentType, analysis.Confidence)
+			subAgent := a.Orchestrator.CreateSubAgent(analysis, a.Skills)
+			result, err := subAgent.Run(ctx, chatID, task)
+			if err == nil {
+				result.AgentType = string(analysis.AgentType)
+				log.Printf("[AGENT] SubAgent success")
+				return result, nil
+			}
+			log.Printf("[AGENT] SubAgent failed: %v, fallback", err)
 		}
 	}
 
-	autoServers, err := mcp.AutoDiscover("mcp_servers")
-	if err != nil {
-		log.Printf("MCP autodiscover warning: %v", err)
-	} else {
-		for _, srv := range autoServers {
-			if err := mcpClient.Register(srv); err != nil {
-				log.Printf("MCP autodiscover register error %s: %v", srv.Name, err)
+	return a.runLegacy(ctx, chatID, task)
+}
+
+func (a *Agent) runLegacy(ctx context.Context, chatID int64, task string) (*AgentResult, error) {
+	result := &AgentResult{AgentType: "general"}
+	a.Memory.SaveMessage(chatID, "user", task)
+
+	skillPrompt := ""
+	if a.Skills != nil {
+		skillPrompt = a.Skills.BuildPromptRelevant(task, 5)
+	}
+	log.Printf("[AGENT] Skills: %d chars", len(skillPrompt))
+
+	for step := 0; step < a.MaxSteps; step++ {
+		log.Printf("[AGENT] Step %d/%d", step+1, a.MaxSteps)
+
+		history, _ := a.Memory.LoadHistory(chatID, 50)
+		messages := a.buildMessages(history, task, skillPrompt)
+		log.Printf("[AGENT] Messages: %d", len(messages))
+
+		response, err := a.LLM.Complete(ctx, messages, &llm.CompletionOpts{
+			Model:       "mistral-large-latest",
+			Temperature: 0.7,
+			MaxTokens:   32000,
+		})
+		if err != nil {
+			log.Printf("[AGENT] LLM error: %v", err)
+			return nil, err
+		}
+
+		result.InputTokens += response.InputTokens
+		result.OutputTokens += response.OutputTokens
+		result.TotalTokens += response.TotalTokens
+
+		calls := ParseToolCalls(response.Content)
+		log.Printf("[AGENT] Tool calls: %d", len(calls))
+
+		if len(calls) == 0 {
+			result.Answer = response.Content
+			log.Printf("[AGENT] Final answer: %d chars", len(result.Answer))
+			break
+		}
+
+		a.Memory.SaveMessage(chatID, "assistant", response.Content)
+
+		for _, call := range calls {
+			log.Printf("[AGENT] Executing: %s", call.Tool)
+			result.AgentLog = append(result.AgentLog, fmt.Sprintf("Step %d: %s", step+1, call.Tool))
+
+			var output string
+			var err error
+
+			if a.MCP != nil {
+				output, err = a.MCP.CallToolAuto(ctx, call.Tool, call.Args)
+				if err == nil {
+					a.Memory.SaveMessage(chatID, "user", fmt.Sprintf("Tool <%s>: %s", call.Tool, output))
+					if call.Tool == "thinking.note" {
+						if note, ok := call.Args["note"].(string); ok {
+							result.ThinkingNotes = append(result.ThinkingNotes, note)
+						}
+					}
+					continue
+				}
+				log.Printf("[AGENT] MCP failed: %v", err)
+			}
+
+			output, err = a.Executor.Execute(ctx, chatID, 0, call)
+			if err != nil {
+				output = fmt.Sprintf("Error: %v", err)
+			}
+
+			a.Memory.SaveMessage(chatID, "user", fmt.Sprintf("Tool <%s>: %s", call.Tool, output))
+			if call.Tool == "thinking.note" {
+				if note, ok := call.Args["note"].(string); ok {
+					result.ThinkingNotes = append(result.ThinkingNotes, note)
+				}
 			}
 		}
 	}
 
-	log.Printf("MCP servers: %d registered (lazy load)", len(mcpClient.GetServerNames()))
-
-	llmClient := llm.NewMistralClient(cfg.LLM.APIKey, cfg.LLM.Provider)
-	log.Println("LLM client created")
-
-	tg, err := transport.NewTelegram(cfg.Telegram.BotToken, nil)
-	if err != nil {
-		log.Fatal(err)
+	if result.Answer != "" {
+		a.Memory.SaveMessage(chatID, "assistant", result.Answer)
 	}
-	log.Println("Telegram transport created")
 
-	sbx, _ := sandbox.NewSandbox("sandbox")
-	executor := agent.NewToolExecutor(tg, sbx)
-	botAgent := agent.NewAgent(llmClient, store, executor, skillRegistry, mcpClient)
+	log.Printf("[AGENT] Done: %d tokens", result.TotalTokens)
+	return result, nil
+}
 
-	// NEW: Tier Router setup
-	tierRouter := agent.NewTierRouter(llmClient)
-	tierExecutor := agent.NewTierExecutor(botAgent, tierRouter, nil) // orchestrator can be added later
-	botAgent.SetTierExecutor(tierExecutor)
-	log.Println("Tier Router initialized")
+func (a *Agent) buildMessages(history []memory.Message, task, skillPrompt string) []llm.Message {
+	var messages []llm.Message
 
-	// Optional: Orchestrator for Tier 3
-	orchestrator := agent.NewOrchestrator(botAgent, llmClient)
-	botAgent.SetOrchestrator(orchestrator)
-	tierExecutor.Orchestrator = orchestrator
-	log.Println("Orchestrator initialized")
+	var sb strings.Builder
+	sb.WriteString("You are XLI-Go Bot, an AI assistant.\n\n")
+	sb.WriteString("CRITICAL RULES:\n")
+	sb.WriteString("1. Be CONCISE. 2-3 sentences max unless asked for details.\n")
+	sb.WriteString("2. Use tools for code/files. NEVER put code in text response.\n")
+	sb.WriteString("3. Use thinking.note to plan\n")
+	sb.WriteString("4. Use web.search for current info\n")
+	sb.WriteString("5. ALWAYS use ```tool_call format\n")
+	sb.WriteString("6. After writing .go file, COMPILE with terminal.run go build\n")
+	sb.WriteString("7. MCP tools are called SAME WAY as built-in tools\n")
+	sb.WriteString("8. You can use MULTIPLE tools in sequence\n")
+	sb.WriteString("9. ALWAYS use file.write for code, NEVER in response text\n")
+	sb.WriteString("10. For Python scripts, use terminal.run python3 or sandbox.run\n")
 
-	tg.SetAgent(botAgent)
-	log.Println("Agent + TierRouter + Orchestrator created")
+	sb.WriteString("\nBuilt-in tools:\n")
+	sb.WriteString("```tool_call\n")
+	sb.WriteString(`{"tool":"thinking.note","args":{"note":"your thought"}}`)
+	sb.WriteString("\n```\n")
+	sb.WriteString("```tool_call\n")
+	sb.WriteString(`{"tool":"terminal.run","args":{"cmd":"command"}}`)
+	sb.WriteString("\n```\n")
+	sb.WriteString("```tool_call\n")
+	sb.WriteString(`{"tool":"file.read","args":{"path":"/path"}}`)
+	sb.WriteString("\n```\n")
+	sb.WriteString("```tool_call\n")
+	sb.WriteString(`{"tool":"file.write","args":{"path":"/path","content":"data"}}`)
+	sb.WriteString("\n```\n")
+	sb.WriteString("```tool_call\n")
+	sb.WriteString(`{"tool":"web.search","args":{"query":"search"}}`)
+	sb.WriteString("\n```\n")
+	sb.WriteString("```tool_call\n")
+	sb.WriteString(`{"tool":"web.fetch","args":{"url":"https://..."}}`)
+	sb.WriteString("\n```\n")
+	sb.WriteString("```tool_call\n")
+	sb.WriteString(`{"tool":"archive.create","args":{"source":"/path","name":"archive.zip"}}`)
+	sb.WriteString("\n```\n")
+	sb.WriteString("```tool_call\n")
+	sb.WriteString(`{"tool":"sandbox.run","args":{"path":"/path/to/binary"}}`)
+	sb.WriteString("\n```\n")
 
-	go func() {
-		ticker := time.NewTicker(5 * time.Minute)
-		defer ticker.Stop()
-		for range ticker.C {
-			mcpClient.CleanupIdle()
+	sb.WriteString("\nMCP tools (lazy loaded, auto-routed):\n")
+	sb.WriteString("- search_code, analyze_traceback, run_tests, fix_test\n")
+	sb.WriteString("- suggest_command, fix_typo, generate_complex_command\n")
+	sb.WriteString("- list_dependencies, check_vulnerabilities, update_dependencies\n")
+	sb.WriteString("- prompt_create, prompt_get, prompt_list, prompt_evaluate\n")
+	sb.WriteString("- blame_line, code_ownership, commit_history, temporal_coupling\n")
+	sb.WriteString("- analyze_complexity, detect_long_methods\n")
+	sb.WriteString("- dependency_graph, circular_dependencies, suggest_modules\n")
+	sb.WriteString("- discover_tests\n")
+
+	if skillPrompt != "" {
+		sb.WriteString("\n")
+		sb.WriteString(skillPrompt)
+	}
+
+	messages = append(messages, llm.Message{
+		Role:    "system",
+		Content: sb.String(),
+	})
+
+	var lastRole string
+	for _, msg := range history {
+		if msg.Role == lastRole || strings.TrimSpace(msg.Content) == "" {
+			continue
 		}
-	}()
+		messages = append(messages, llm.Message{
+			Role:    msg.Role,
+			Content: msg.Content,
+		})
+		lastRole = msg.Role
+	}
 
-	log.Println("XLI Bot v2 with Tier Router started!")
-	tg.Start()
+	if lastRole == "assistant" {
+		messages = append(messages, llm.Message{
+			Role:    "user",
+			Content: "Continue",
+		})
+	}
+
+	return messages
+}
+
+func (a *Agent) SimpleAsk(ctx context.Context, task string) (*AgentResult, error) {
+	response, err := a.LLM.Complete(ctx, []llm.Message{
+		{Role: "user", Content: task},
+	}, &llm.CompletionOpts{
+		Model:       "mistral-large-latest",
+		Temperature: 0.7,
+		MaxTokens:   32000,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &AgentResult{
+		Answer:       response.Content,
+		InputTokens:  response.InputTokens,
+		OutputTokens: response.OutputTokens,
+		TotalTokens:  response.TotalTokens,
+		AgentType:    "general",
+	}, nil
+}
+
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }
