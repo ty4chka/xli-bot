@@ -21,6 +21,26 @@ const (
 	PageSize         = 3500
 )
 
+var (
+	regenStore   = make(map[string]string)
+	regenStoreMu sync.RWMutex
+)
+
+func storeRegenText(text string) string {
+	hash := fmt.Sprintf("%x", time.Now().UnixNano())[:12]
+	regenStoreMu.Lock()
+	regenStore[hash] = text
+	regenStoreMu.Unlock()
+	return hash
+}
+
+func getRegenText(hash string) string {
+	regenStoreMu.RLock()
+	text := regenStore[hash]
+	regenStoreMu.RUnlock()
+	return text
+}
+
 type TelegramTransport struct {
 	bot           *tgbotapi.BotAPI
 	agent         *agent.Agent
@@ -272,12 +292,16 @@ func (t *TelegramTransport) processAgentRequest(chatID int64, text string) {
 func (t *TelegramTransport) buildActionKeyboard(chatID int64, originalText string, result *agent.AgentResult) tgbotapi.InlineKeyboardMarkup {
 	var rows [][]tgbotapi.InlineKeyboardButton
 
+	// Store original text for regen (hash to fit 64-byte Telegram limit)
+	regenHash := storeRegenText(originalText)
+	explainHash := storeRegenText(originalText)
+
 	// Row 1: Action buttons for code results
 	var actionRow []tgbotapi.InlineKeyboardButton
 	if result.AgentType == "tier2_single" || result.AgentType == "coder" || result.AgentType == "build" {
 		actionRow = append(actionRow, tgbotapi.NewInlineKeyboardButtonData("▶️ Run", fmt.Sprintf("action:run:%d", chatID)))
 		actionRow = append(actionRow, tgbotapi.NewInlineKeyboardButtonData("📦 Download", fmt.Sprintf("action:download:%d", chatID)))
-		actionRow = append(actionRow, tgbotapi.NewInlineKeyboardButtonData("📖 Explain", fmt.Sprintf("action:explain:%s", originalText)))
+		actionRow = append(actionRow, tgbotapi.NewInlineKeyboardButtonData("📖 Explain", fmt.Sprintf("action:explain:%s", explainHash)))
 	}
 	if len(actionRow) > 0 {
 		rows = append(rows, actionRow)
@@ -286,7 +310,7 @@ func (t *TelegramTransport) buildActionKeyboard(chatID int64, originalText strin
 	// Row 2: Utility buttons
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 		tgbotapi.NewInlineKeyboardButtonData("🧹 Clear", fmt.Sprintf("action:clear:%d", chatID)),
-		tgbotapi.NewInlineKeyboardButtonData("🔃 Regen", fmt.Sprintf("action:regen:%s", originalText)),
+		tgbotapi.NewInlineKeyboardButtonData("🔃 Regen", fmt.Sprintf("action:regen:%s", regenHash)),
 	))
 
 	return tgbotapi.NewInlineKeyboardMarkup(rows...)
@@ -307,9 +331,14 @@ func (t *TelegramTransport) buildBookKeyboard(bookKey string, currentPage, total
 		rows = append(rows, navRow)
 	}
 
+	// Store original text for regen (hash to fit 64-byte Telegram limit)
+	regenHash := ""
+	if originalText != "" {
+		regenHash = storeRegenText(originalText)
+	}
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 		tgbotapi.NewInlineKeyboardButtonData("🧹 Clear", fmt.Sprintf("action:clear:%d", chatID)),
-		tgbotapi.NewInlineKeyboardButtonData("🔃 Regen", fmt.Sprintf("action:regen:%s", originalText)),
+		tgbotapi.NewInlineKeyboardButtonData("🔃 Regen", fmt.Sprintf("action:regen:%s", regenHash)),
 	))
 
 	return tgbotapi.NewInlineKeyboardMarkup(rows...)
@@ -419,7 +448,11 @@ func (t *TelegramTransport) handleCallback(query *tgbotapi.CallbackQuery) {
 			}
 		case "regen":
 			if len(parts) >= 3 {
-				originalText := strings.Join(parts[2:], ":")
+				hash := parts[2]
+				originalText := getRegenText(hash)
+				if originalText == "" {
+					originalText = hash // fallback
+				}
 				t.bot.Request(tgbotapi.NewDeleteMessage(chatID, msgID))
 				t.processAgentRequest(chatID, originalText)
 			}
@@ -433,7 +466,11 @@ func (t *TelegramTransport) handleCallback(query *tgbotapi.CallbackQuery) {
 			return
 		case "explain":
 			if len(parts) >= 3 {
-				originalText := strings.Join(parts[2:], ":")
+				hash := parts[2]
+				originalText := getRegenText(hash)
+				if originalText == "" {
+					originalText = hash
+				}
 				explainQuery := "Explain this code in detail: " + originalText
 				t.bot.Request(tgbotapi.NewDeleteMessage(chatID, msgID))
 				t.processAgentRequest(chatID, explainQuery)
