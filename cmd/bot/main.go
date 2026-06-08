@@ -50,7 +50,6 @@ func main() {
 	// MCP — регистрация серверов
 	mcpClient := mcp.NewClient()
 
-	// Ручная регистрация всех MCP серверов
 	mcpServers := []mcp.MCPServer{
 		{Name: "debugger", Script: "./mcp_servers/mcp-debugger-cli.py", Enabled: true},
 		{Name: "knowledge", Script: "./mcp_servers/mcp-knowledge-cli.py", Enabled: true},
@@ -71,7 +70,6 @@ func main() {
 		}
 	}
 
-	// AutoDiscover как fallback
 	autoServers, err := mcp.AutoDiscover("mcp_servers")
 	if err != nil {
 		log.Printf("MCP autodiscover warning: %v", err)
@@ -97,10 +95,21 @@ func main() {
 	sbx, _ := sandbox.NewSandbox("sandbox")
 	executor := agent.NewToolExecutor(tg, sbx)
 	botAgent := agent.NewAgent(llmClient, store, executor, skillRegistry, mcpClient)
+
+	// NEW: Tier Router setup
+	tierRouter := agent.NewTierRouter(llmClient)
+	tierExecutor := agent.NewTierExecutor(botAgent, tierRouter, nil) // orchestrator can be added later
+	botAgent.SetTierExecutor(tierExecutor)
+	log.Println("Tier Router initialized")
+
+	// Optional: Orchestrator for Tier 3
 	orchestrator := agent.NewOrchestrator(botAgent, llmClient)
 	botAgent.SetOrchestrator(orchestrator)
+	tierExecutor.Orchestrator = orchestrator
+	log.Println("Orchestrator initialized")
+
 	tg.SetAgent(botAgent)
-	log.Println("Agent + Orchestrator created")
+	log.Println("Agent + TierRouter + Orchestrator created")
 
 	go func() {
 		ticker := time.NewTicker(5 * time.Minute)
@@ -110,6 +119,6 @@ func main() {
 		}
 	}()
 
-	log.Println("XLI Bot v2 started!")
+	log.Println("XLI Bot v2 with Tier Router started!")
 	tg.Start()
 }
