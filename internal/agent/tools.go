@@ -1,355 +1,510 @@
 package agent
 
 import (
-	"archive/zip"
-	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"log"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/oblachko/xli-bot/internal/sandbox"
-	"github.com/oblachko/xli-bot/internal/utils"
+	"github.com/oblachko/xli-bot/internal/llm"
+	"github.com/oblachko/xli-bot/internal/memory"
+	"github.com/oblachko/xli-bot/internal/skills"
 )
 
-type ToolExecutor struct {
-	transport Transport
-	sandbox   *sandbox.Sandbox
+// ExecutionTier — уровень сложности выполнения
+type ExecutionTier int
+
+const (
+	Tier1Direct    ExecutionTier = 1 // Приветствия, вопросы, объяснения — 1 LLM вызов
+	Tier2SingleAgent ExecutionTier = 2 // "Напиши скрипт", "Найди доки" — 1 агент, 1-4 шага
+	Tier3MultiAgent  ExecutionTier = 3 // Проект с БД, компиляция, архив — мультиагент
+)
+
+// TierResult — результат анализа tier
+type TierResult struct {
+	Tier        ExecutionTier
+	Confidence  float64
+	Reasoning   string
+	MaxSteps    int
+	Timeout     time.Duration
+	NeedsTools  []string
+	IsSimple    bool // true = "простой" запрос → 1 файл, минимум шагов
 }
 
-type Transport interface {
-	ShowConfirmation(chatID int64, msgID int, toolName string, args map[string]interface{}) (bool, error)
-	SendFileBytes(chatID int64, name string, data []byte, caption string) error
+// TierRouter — LLM-based анализатор сложности запроса
+type TierRouter struct {
+	LLM llm.Client
 }
 
-func NewToolExecutor(t Transport, sbx *sandbox.Sandbox) *ToolExecutor {
-	return &ToolExecutor{
-		transport: t,
-		sandbox:   sbx,
-	}
+func NewTierRouter(llm llm.Client) *TierRouter {
+	return &TierRouter{LLM: llm}
 }
 
-func (te *ToolExecutor) Execute(ctx context.Context, chatID int64, msgID int, call ToolCall) (string, error) {
-	log.Printf("[TOOL] Executing: %s", call.Tool)
+// Analyze — LLM анализирует запрос и выбирает tier
+func (tr *TierRouter) Analyze(ctx context.Context, query string) (*TierResult, error) {
+	prompt := fmt.Sprintf(`Analyze this user request and classify its complexity.
 
-	switch call.Tool {
-	case "thinking.note":
-		return te.thinkingNote(call.Args)
-	case "terminal.run":
-		return te.terminalRun(ctx, chatID, msgID, call.Args)
-	case "file.read":
-		return te.fileRead(call.Args)
-	case "file.write":
-		return te.fileWrite(ctx, chatID, msgID, call.Args)
-	case "web.search":
-		return te.webSearch(ctx, call.Args)
-	case "web.fetch":
-		return te.webFetch(ctx, call.Args)
-	case "github.build":
-		return te.githubBuild(ctx, chatID, msgID, call.Args)
-	case "sandbox.run":
-		return te.sandboxRun(ctx, chatID, msgID, call.Args)
-	case "archive.create":
-		return te.archiveCreate(ctx, chatID, msgID, call.Args)
-	default:
-		return "", fmt.Errorf("unknown tool: %s", call.Tool)
-	}
-}
+Request: "%s"
 
-func (te *ToolExecutor) thinkingNote(args map[string]interface{}) (string, error) {
-	note, _ := args["note"].(string)
-	log.Printf("[TOOL] thinking.note: %s", note)
-	return fmt.Sprintf("Thinking: %s", note), nil
-}
+Rules for classification:
+- "simple", "простой", "easy" in request -> ALWAYS Tier 1, max 1 file, <50 lines
+- Greetings, questions, explanations -> Tier 1 (1 LLM call, no tools)
+- "Write script", "find docs", "translate" -> Tier 2 (1 agent, 1-4 steps)
+- "Project", "compile", "test", "archive", "DB", "API", "deploy" -> Tier 3 (multi-agent, up to 15 steps)
 
-func (te *ToolExecutor) terminalRun(ctx context.Context, chatID int64, msgID int, args map[string]interface{}) (string, error) {
-	cmdStr, _ := args["cmd"].(string)
-	if cmdStr == "" {
-		return "", fmt.Errorf("no command")
-	}
+Respond EXACTLY in this format:
+TIER: <1|2|3>
+CONFIDENCE: <0-100>
+REASONING: <brief explanation>
+MAX_STEPS: <1-15>
+TIMEOUT_SEC: <30-300>
+IS_SIMPLE: <true|false>
+NEEDS_TOOLS: <tool1,tool2,... or none>`, query)
 
-	log.Printf("[TOOL] terminal.run: %s", cmdStr)
-
-	if isDangerous(cmdStr) {
-		log.Printf("[TOOL] Dangerous command, requesting confirmation")
-		approved, err := te.transport.ShowConfirmation(chatID, msgID, "terminal.run", args)
-		if err != nil || !approved {
-			return "Cancelled by user", nil
-		}
-	}
-
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "sh", "-c", cmdStr)
-	output, err := cmd.CombinedOutput()
+	response, err := tr.LLM.Complete(ctx, []llm.Message{
+		{Role: "user", Content: prompt},
+	}, &llm.CompletionOpts{
+		Model:       "mistral-large-latest",
+		Temperature: 0.1,
+		MaxTokens:   500,
+	})
 	if err != nil {
-		log.Printf("[TOOL] terminal.run error: %v, output: %d chars", err, len(output))
-		return fmt.Sprintf("Error: %v\n%s", err, string(output)), nil
+		log.Printf("[TIER] LLM analyze error: %v, fallback to Tier2", err)
+		return tr.fallbackTier(query), nil
 	}
-	log.Printf("[TOOL] terminal.run success: %d chars", len(output))
-	return string(output), nil
+
+	return parseTierResult(response.Content, query), nil
 }
 
-func (te *ToolExecutor) fileRead(args map[string]interface{}) (string, error) {
-	path, _ := args["path"].(string)
-	if path == "" {
-		return "", fmt.Errorf("no path")
+func (tr *TierRouter) fallbackTier(query string) *TierResult {
+	lower := strings.ToLower(query)
+	simpleWords := []string{"простой", "simple", "easy", "basic", "hello", "hi", "привет"}
+	heavyWords := []string{"project", "compile", "test", "archive", "база данных", "deploy", "много файлов"}
+
+	isSimple := false
+	for _, w := range simpleWords {
+		if strings.Contains(lower, w) {
+			isSimple = true
+			break
+		}
 	}
-	log.Printf("[TOOL] file.read: %s", path)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", err
+
+	heavyCount := 0
+	for _, w := range heavyWords {
+		if strings.Contains(lower, w) {
+			heavyCount++
+		}
 	}
-	log.Printf("[TOOL] file.read success: %d bytes", len(data))
-	return string(data), nil
+
+	if isSimple || len(query) < 50 {
+		return &TierResult{Tier: Tier1Direct, Confidence: 80, MaxSteps: 1, Timeout: 60 * time.Second, IsSimple: true}
+	}
+	if heavyCount >= 2 || len(query) > 200 {
+		return &TierResult{Tier: Tier3MultiAgent, Confidence: 70, MaxSteps: 15, Timeout: 300 * time.Second, IsSimple: false}
+	}
+	return &TierResult{Tier: Tier2SingleAgent, Confidence: 70, MaxSteps: 4, Timeout: 120 * time.Second, IsSimple: false}
 }
 
-func (te *ToolExecutor) fileWrite(ctx context.Context, chatID int64, msgID int, args map[string]interface{}) (string, error) {
-	path, _ := args["path"].(string)
-	content, _ := args["content"].(string)
-	if path == "" {
-		return "", fmt.Errorf("no path")
+func parseTierResult(text, query string) *TierResult {
+	result := &TierResult{
+		Tier:       Tier2SingleAgent,
+		Confidence: 50,
+		MaxSteps:   4,
+		Timeout:    120 * time.Second,
+		IsSimple:   false,
+		NeedsTools: []string{},
 	}
 
-	log.Printf("[TOOL] file.write: %s (%d bytes)", path, len(content))
-
-	if _, err := os.Stat(path); err == nil {
-		log.Printf("[TOOL] File exists, requesting confirmation")
-		approved, err := te.transport.ShowConfirmation(chatID, msgID, "file.write", args)
-		if err != nil || !approved {
-			return "Cancelled by user", nil
-		}
+	lower := strings.ToLower(query)
+	if strings.Contains(lower, "простой") || strings.Contains(lower, "simple") ||
+		strings.Contains(lower, "easy") || strings.Contains(lower, "basic") {
+		result.IsSimple = true
 	}
 
-	dir := filepath.Dir(path)
-	if dir != "." && dir != "" {
-		os.MkdirAll(dir, 0755)
-	}
-
-	err := os.WriteFile(path, []byte(content), 0644)
-	if err != nil {
-		log.Printf("[TOOL] file.write error: %v", err)
-		return "", err
-	}
-	log.Printf("[TOOL] file.write success: %s", path)
-
-	fileName := filepath.Base(path)
-	data := []byte(content)
-
-	log.Printf("[TOOL] Sending source file: %s", fileName)
-	if err := te.transport.SendFileBytes(chatID, fileName, data,
-		fmt.Sprintf("📄 <code>%s</code> (%d bytes)", fileName, len(data))); err != nil {
-		log.Printf("[TOOL] Send source error: %v", err)
-	}
-
-	if strings.HasSuffix(path, ".go") {
-		log.Printf("[TOOL] Auto-compiling Go: %s", path)
-		dir := filepath.Dir(path)
-		binName := strings.TrimSuffix(fileName, ".go")
-
-		var compileCmd string
-		if dir == "." || dir == "" {
-			compileCmd = fmt.Sprintf("go build -o %s %s", binName, fileName)
-		} else {
-			compileCmd = fmt.Sprintf("cd %s && go build -o %s %s", dir, binName, fileName)
-		}
-
-		cmd := exec.CommandContext(ctx, "sh", "-c", compileCmd)
-		compileOutput, compileErr := cmd.CombinedOutput()
-		if compileErr != nil {
-			log.Printf("[TOOL] Compile error: %v\n%s", compileErr, string(compileOutput))
-			return fmt.Sprintf("✅ Written: %s (%d bytes)\n❌ Compile error: %v\n%s",
-				path, len(data), compileErr, string(compileOutput)), nil
-		}
-
-		log.Printf("[TOOL] Compiled: %s", binName)
-
-		binPath := filepath.Join(dir, binName)
-		if binData, err := os.ReadFile(binPath); err == nil {
-			log.Printf("[TOOL] Sending binary: %s (%d bytes)", binName, len(binData))
-			if sendErr := te.transport.SendFileBytes(chatID, binName, binData,
-				fmt.Sprintf("⚙️ Compiled: <code>%s</code> (%d bytes)", binName, len(binData))); sendErr != nil {
-				log.Printf("[TOOL] Send binary error: %v", sendErr)
+	lines := strings.Split(text, "
+")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "TIER:") {
+			var tier int
+			fmt.Sscanf(line, "TIER: %d", &tier)
+			switch tier {
+			case 1:
+				result.Tier = Tier1Direct
+			case 2:
+				result.Tier = Tier2SingleAgent
+			case 3:
+				result.Tier = Tier3MultiAgent
 			}
 		}
-
-		return fmt.Sprintf("✅ Written: %s (%d bytes)\n✅ Compiled: %s\n%s",
-			path, len(data), binName, string(compileOutput)), nil
-	}
-
-	if strings.HasSuffix(path, ".py") {
-		log.Printf("[TOOL] Auto-running Python: %s", path)
-		runCmd := fmt.Sprintf("python3 %s", path)
-		cmd := exec.CommandContext(ctx, "sh", "-c", runCmd)
-		runOutput, runErr := cmd.CombinedOutput()
-		if runErr != nil {
-			log.Printf("[TOOL] Python run error: %v", runErr)
-			return fmt.Sprintf("✅ Written: %s (%d bytes)\n❌ Run error: %v\n%s",
-				path, len(data), runErr, string(runOutput)), nil
+		if strings.HasPrefix(line, "CONFIDENCE:") {
+			fmt.Sscanf(line, "CONFIDENCE: %f", &result.Confidence)
 		}
-		log.Printf("[TOOL] Python run success: %d chars", len(runOutput))
-		return fmt.Sprintf("✅ Written: %s (%d bytes)\n✅ Run output:\n%s",
-			path, len(data), string(runOutput)), nil
+		if strings.HasPrefix(line, "REASONING:") {
+			result.Reasoning = strings.TrimSpace(strings.TrimPrefix(line, "REASONING:"))
+		}
+		if strings.HasPrefix(line, "MAX_STEPS:") {
+			fmt.Sscanf(line, "MAX_STEPS: %d", &result.MaxSteps)
+			if result.MaxSteps < 1 {
+				result.MaxSteps = 1
+			}
+			if result.MaxSteps > 15 {
+				result.MaxSteps = 15
+			}
+		}
+		if strings.HasPrefix(line, "TIMEOUT_SEC:") {
+			var sec int
+			fmt.Sscanf(line, "TIMEOUT_SEC: %d", &sec)
+			if sec >= 30 && sec <= 300 {
+				result.Timeout = time.Duration(sec) * time.Second
+			}
+		}
+		if strings.HasPrefix(line, "IS_SIMPLE:") {
+			val := strings.TrimSpace(strings.TrimPrefix(line, "IS_SIMPLE:"))
+			result.IsSimple = val == "true" || val == "True" || val == "TRUE"
+		}
+		if strings.HasPrefix(line, "NEEDS_TOOLS:") {
+			toolsStr := strings.TrimSpace(strings.TrimPrefix(line, "NEEDS_TOOLS:"))
+			if toolsStr != "" && toolsStr != "none" {
+				result.NeedsTools = strings.Split(toolsStr, ",")
+			}
+		}
 	}
 
-	return fmt.Sprintf("✅ Written: %s (%d bytes)", path, len(data)), nil
+	if result.IsSimple {
+		result.Tier = Tier1Direct
+		result.MaxSteps = 1
+		if result.Timeout > 60*time.Second {
+			result.Timeout = 60 * time.Second
+		}
+	}
+
+	return result
 }
 
-// archive.create — НОВЫЙ ТУЛ: создаёт ZIP архив
-func (te *ToolExecutor) archiveCreate(ctx context.Context, chatID int64, msgID int, args map[string]interface{}) (string, error) {
-	sourcePath, _ := args["source"].(string)
-	archiveName, _ := args["name"].(string)
+// TierExecutor — выполняет запрос согласно tier
+type TierExecutor struct {
+	Agent        *Agent
+	Router       *TierRouter
+	Orchestrator *Orchestrator
+}
 
-	if sourcePath == "" {
-		return "", fmt.Errorf("source path required")
+func NewTierExecutor(agent *Agent, router *TierRouter, orch *Orchestrator) *TierExecutor {
+	return &TierExecutor{
+		Agent:        agent,
+		Router:       router,
+		Orchestrator: orch,
 	}
-	if archiveName == "" {
-		archiveName = "archive.zip"
+}
+
+// Run — главный entry point, заменяет Agent.Run()
+func (te *TierExecutor) Run(ctx context.Context, chatID int64, task string) (*AgentResult, error) {
+	log.Printf("[TIER] ════════════════════════════════════════")
+	log.Printf("[TIER] 🚀 Analyzing task: chat=%d", chatID)
+	log.Printf("[TIER] 📝 Task: %q", task)
+
+	tier, err := te.Router.Analyze(ctx, task)
+	if err != nil {
+		log.Printf("[TIER] ⚠️ Analyze error: %v, using fallback", err)
+		tier = te.Router.fallbackTier(task)
 	}
-	if !strings.HasSuffix(archiveName, ".zip") {
-		archiveName += ".zip"
+
+	log.Printf("[TIER] 📊 DECISION: tier=%d, confidence=%.0f%%, maxSteps=%d, timeout=%v, simple=%v",
+		tier.Tier, tier.Confidence, tier.MaxSteps, tier.Timeout, tier.IsSimple)
+	if tier.Reasoning != "" {
+		log.Printf("[TIER] 💭 Reasoning: %s", tier.Reasoning)
 	}
 
-	log.Printf("[TOOL] archive.create: %s → %s", sourcePath, archiveName)
+	ctx, cancel := context.WithTimeout(ctx, tier.Timeout)
+	defer cancel()
 
-	// Проверяем существование
-	if _, err := os.Stat(sourcePath); os.IsNotExist(err) {
-		return "", fmt.Errorf("source not found: %s", sourcePath)
+	switch tier.Tier {
+	case Tier1Direct:
+		return te.runTier1(ctx, chatID, task, tier)
+	case Tier2SingleAgent:
+		return te.runTier2(ctx, chatID, task, tier)
+	case Tier3MultiAgent:
+		return te.runTier3(ctx, chatID, task, tier)
+	default:
+		return te.runTier2(ctx, chatID, task, tier)
+	}
+}
+
+// Tier 1: Прямой ответ, 1 LLM вызов, никаких тулов
+func (te *TierExecutor) runTier1(ctx context.Context, chatID int64, task string, tier *TierResult) (*AgentResult, error) {
+	log.Printf("[TIER1] ⚡ Direct response mode")
+
+	messages := []llm.Message{
+		{Role: "system", Content: buildTier1SystemPrompt(tier.IsSimple)},
+		{Role: "user", Content: task},
 	}
 
-	// Создаём ZIP в памяти
-	var buf bytes.Buffer
-	zipWriter := zip.NewWriter(&buf)
+	response, err := te.Agent.LLM.Complete(ctx, messages, &llm.CompletionOpts{
+		Model:       "mistral-large-latest",
+		Temperature: 0.7,
+		MaxTokens:   4000,
+	})
+	if err != nil {
+		return nil, err
+	}
 
-	// Обходим директорию
-	err := filepath.Walk(sourcePath, func(filePath string, info os.FileInfo, err error) error {
+	result := &AgentResult{
+		Answer:        response.Content,
+		InputTokens:   response.InputTokens,
+		OutputTokens:  response.OutputTokens,
+		TotalTokens:   response.TotalTokens,
+		AgentType:     "tier1_direct",
+		ThinkingNotes: []string{"Direct response — no tools needed"},
+	}
+
+	if HasToolCalls(result.Answer) {
+		log.Printf("[TIER1] ⚠️ Unexpected tool calls in Tier1, falling back to Tier2")
+		return te.runTier2(ctx, chatID, task, tier)
+	}
+
+	te.Agent.Memory.SaveMessage(chatID, "user", task)
+	te.Agent.Memory.SaveMessage(chatID, "assistant", result.Answer)
+
+	log.Printf("[TIER1] ✅ Done: %d tokens, %d chars", result.TotalTokens, len(result.Answer))
+	return result, nil
+}
+
+// Tier 2: Один агент, ограниченные шаги
+func (te *TierExecutor) runTier2(ctx context.Context, chatID int64, task string, tier *TierResult) (*AgentResult, error) {
+	log.Printf("[TIER2] 🔧 Single agent mode, maxSteps=%d", tier.MaxSteps)
+
+	result := &AgentResult{AgentType: "tier2_single"}
+	te.Agent.Memory.SaveMessage(chatID, "user", task)
+
+	skillPrompt := ""
+	if te.Agent.Skills != nil {
+		skillPrompt = te.Agent.Skills.BuildPromptRelevant(task, 3)
+	}
+
+	for step := 0; step < tier.MaxSteps; step++ {
+		log.Printf("[TIER2] ───── Step %d/%d ─────", step+1, tier.MaxSteps)
+
+		history, _ := te.Agent.Memory.LoadHistory(chatID, 30)
+		messages := te.buildTier2Messages(history, task, skillPrompt, tier)
+
+		response, err := te.Agent.LLM.Complete(ctx, messages, &llm.CompletionOpts{
+			Model:       "mistral-large-latest",
+			Temperature: 0.7,
+			MaxTokens:   8000,
+		})
 		if err != nil {
-			return err
-		}
-		if info.IsDir() {
-			return nil
+			log.Printf("[TIER2] ❌ LLM error: %v", err)
+			return nil, err
 		}
 
-		// Относительный путь внутри архива
-		relPath, err := filepath.Rel(sourcePath, filePath)
-		if err != nil {
-			return err
+		result.InputTokens += response.InputTokens
+		result.OutputTokens += response.OutputTokens
+		result.TotalTokens += response.TotalTokens
+
+		calls := ParseToolCalls(response.Content)
+		log.Printf("[TIER2] Tool calls: %d", len(calls))
+
+		if len(calls) == 0 {
+			result.Answer = response.Content
+			log.Printf("[TIER2] ✅ Final answer: %d chars", len(result.Answer))
+			break
 		}
 
-		// Заменяем сепараторы для кросс-платформенности
-		relPath = filepath.ToSlash(relPath)
+		te.Agent.Memory.SaveMessage(chatID, "assistant", response.Content)
 
-		writer, err := zipWriter.Create(relPath)
-		if err != nil {
-			return err
+		for _, call := range calls {
+			result.AgentLog = append(result.AgentLog, fmt.Sprintf("Step %d: %s", step+1, call.Tool))
+
+			var output string
+			var err error
+
+			if te.Agent.MCP != nil {
+				output, err = te.Agent.MCP.CallToolAuto(ctx, call.Tool, call.Args)
+				if err == nil {
+					te.Agent.Memory.SaveMessage(chatID, "user", fmt.Sprintf("Tool <%s>: %s", call.Tool, output))
+					if call.Tool == "thinking.note" {
+						if note, ok := call.Args["note"].(string); ok {
+							result.ThinkingNotes = append(result.ThinkingNotes, note)
+						}
+					}
+					continue
+				}
+			}
+
+			output, err = te.Agent.Executor.Execute(ctx, chatID, 0, call)
+			if err != nil {
+				output = fmt.Sprintf("Error: %v", err)
+			}
+
+			te.Agent.Memory.SaveMessage(chatID, "user", fmt.Sprintf("Tool <%s>: %s", call.Tool, output))
+
+			if call.Tool == "thinking.note" {
+				if note, ok := call.Args["note"].(string); ok {
+					result.ThinkingNotes = append(result.ThinkingNotes, note)
+				}
+			}
 		}
+	}
 
-		file, err := os.Open(filePath)
-		if err != nil {
-			return err
+	if result.Answer != "" {
+		te.Agent.Memory.SaveMessage(chatID, "assistant", result.Answer)
+	}
+
+	log.Printf("[TIER2] ✅ Done: %d tokens", result.TotalTokens)
+	return result, nil
+}
+
+// Tier 3: Мультиагент через оркестратор
+func (te *TierExecutor) runTier3(ctx context.Context, chatID int64, task string, tier *TierResult) (*AgentResult, error) {
+	log.Printf("[TIER3] 🔀 Multi-agent mode")
+
+	if te.Orchestrator != nil {
+		analysis, err := te.Orchestrator.AnalyzeTask(ctx, task)
+		if err == nil && analysis.Confidence > 50 {
+			subAgent := te.Orchestrator.CreateSubAgent(analysis, te.Agent.Skills)
+			subAgent.MaxSteps = tier.MaxSteps
+			result, err := subAgent.Run(ctx, chatID, task)
+			if err == nil {
+				result.AgentType = string(analysis.AgentType)
+				log.Printf("[TIER3] ✅ SubAgent success")
+				return result, nil
+			}
+			log.Printf("[TIER3] ⚠️ SubAgent failed: %v, fallback to Tier2", err)
 		}
-		defer file.Close()
+	}
 
-		_, err = io.Copy(writer, file)
-		return err
+	tier.MaxSteps = 15
+	return te.runTier2(ctx, chatID, task, tier)
+}
+
+func buildTier1SystemPrompt(isSimple bool) string {
+	var sb strings.Builder
+	sb.WriteString("You are XLI-Go Bot, a helpful AI assistant.
+
+")
+	sb.WriteString("CRITICAL RULES:
+")
+	sb.WriteString("1. Be CONCISE. 2-3 sentences max unless asked for details.
+")
+	sb.WriteString("2. If user asks for code, write it inline in markdown blocks.
+")
+	sb.WriteString("3. Do NOT use any tools. Just answer directly.
+")
+	sb.WriteString("4. If user says 'simple' or 'простой', give MINIMAL solution (1 file, <50 lines).
+")
+	sb.WriteString("5. NO venv, NO pip install, NO complex setup for simple requests.
+")
+	return sb.String()
+}
+
+func (te *TierExecutor) buildTier2Messages(history []memory.Message, task, skillPrompt string, tier *TierResult) []llm.Message {
+	var messages []llm.Message
+
+	var sb strings.Builder
+	sb.WriteString("You are XLI-Go Bot, an AI assistant with tools.
+
+")
+	sb.WriteString("CRITICAL RULES:
+")
+	sb.WriteString("1. Be CONCISE. Use tools efficiently.
+")
+	sb.WriteString("2. Use file.write for code, NEVER write code in text response.
+")
+	sb.WriteString("3. Use thinking.note to plan briefly (1 sentence).
+")
+	sb.WriteString("4. If user said 'simple' or 'простой': 1 file, <50 lines, NO dependencies.
+")
+	sb.WriteString("5. Use ```tool_call format for tools.
+")
+	sb.WriteString("6. After writing .go, you may compile with terminal.run.
+")
+	sb.WriteString("7. Use archive.create to pack multiple files.
+")
+	sb.WriteString("8. STOP when task is done. Do not over-engineer.
+")
+
+	sb.WriteString("
+Built-in tools:
+")
+	sb.WriteString("```tool_call
+")
+	sb.WriteString(`{"tool":"thinking.note","args":{"note":"brief plan"}}`)
+	sb.WriteString("
+```
+")
+	sb.WriteString("```tool_call
+")
+	sb.WriteString(`{"tool":"terminal.run","args":{"cmd":"command"}}`)
+	sb.WriteString("
+```
+")
+	sb.WriteString("```tool_call
+")
+	sb.WriteString(`{"tool":"file.read","args":{"path":"/path"}}`)
+	sb.WriteString("
+```
+")
+	sb.WriteString("```tool_call
+")
+	sb.WriteString(`{"tool":"file.write","args":{"path":"/path","content":"data"}}`)
+	sb.WriteString("
+```
+")
+	sb.WriteString("```tool_call
+")
+	sb.WriteString(`{"tool":"web.search","args":{"query":"search"}}`)
+	sb.WriteString("
+```
+")
+	sb.WriteString("```tool_call
+")
+	sb.WriteString(`{"tool":"web.fetch","args":{"url":"https://..."}}`)
+	sb.WriteString("
+```
+")
+	sb.WriteString("```tool_call
+")
+	sb.WriteString(`{"tool":"archive.create","args":{"source":"/path","name":"archive.zip"}}`)
+	sb.WriteString("
+```
+")
+	sb.WriteString("```tool_call
+")
+	sb.WriteString(`{"tool":"sandbox.run","args":{"path":"/path/to/script"}}`)
+	sb.WriteString("
+```
+")
+
+	if skillPrompt != "" {
+		sb.WriteString("
+")
+		sb.WriteString(skillPrompt)
+	}
+
+	messages = append(messages, llm.Message{
+		Role:    "system",
+		Content: sb.String(),
 	})
 
-	if err != nil {
-		return "", fmt.Errorf("zip creation failed: %w", err)
-	}
-
-	if err := zipWriter.Close(); err != nil {
-		return "", fmt.Errorf("zip close failed: %w", err)
-	}
-
-	zipData := buf.Bytes()
-	log.Printf("[TOOL] archive.create success: %d bytes", len(zipData))
-
-	// Отправляем архив
-	te.transport.SendFileBytes(chatID, archiveName, zipData,
-		fmt.Sprintf("📦 <b>Archive</b>: <code>%s</code> (%d bytes)", archiveName, len(zipData)))
-
-	return fmt.Sprintf("✅ Archive created: %s (%d bytes)", archiveName, len(zipData)), nil
-}
-
-func (te *ToolExecutor) webSearch(ctx context.Context, args map[string]interface{}) (string, error) {
-	query, _ := args["query"].(string)
-	if query == "" {
-		return "", fmt.Errorf("no query")
-	}
-	log.Printf("[TOOL] web.search: %s", query)
-	results, err := utils.WebSearch(ctx, query)
-	if err != nil {
-		return "", err
-	}
-	log.Printf("[TOOL] web.search: %d results", len(results))
-	return utils.FormatSearchResults(results, query), nil
-}
-
-func (te *ToolExecutor) webFetch(ctx context.Context, args map[string]interface{}) (string, error) {
-	urlStr, _ := args["url"].(string)
-	if urlStr == "" {
-		return "", fmt.Errorf("no URL")
-	}
-	log.Printf("[TOOL] web.fetch: %s", urlStr)
-	return utils.WebFetch(ctx, urlStr)
-}
-
-func (te *ToolExecutor) githubBuild(ctx context.Context, chatID int64, msgID int, args map[string]interface{}) (string, error) {
-	log.Printf("[TOOL] github.build")
-	approved, err := te.transport.ShowConfirmation(chatID, msgID, "github.build", args)
-	if err != nil || !approved {
-		return "Cancelled by user", nil
-	}
-	return "GitHub Actions dispatched! (stub)", nil
-}
-
-func (te *ToolExecutor) sandboxRun(ctx context.Context, chatID int64, msgID int, args map[string]interface{}) (string, error) {
-	if te.sandbox == nil {
-		return "Sandbox not available", nil
-	}
-
-	path, _ := args["path"].(string)
-	if path == "" {
-		return "", fmt.Errorf("no path")
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", err
-	}
-
-	filename := filepath.Base(path)
-	te.sandbox.WriteFile(filename, data)
-
-	var output string
-	var runErr error
-
-	if strings.HasSuffix(path, ".py") {
-		output, runErr = te.sandbox.PythonRun(filename)
-	} else {
-		output, runErr = te.sandbox.RunCommand(ctx, fmt.Sprintf("./%s", filename))
-	}
-
-	if runErr != nil {
-		return fmt.Sprintf("Sandbox error: %v\n%s", runErr, output), nil
-	}
-	return output, nil
-}
-
-func isDangerous(cmd string) bool {
-	dangerous := []string{"rm -rf /", "mkfs", "dd if=", "> /dev/sd", ":(){:|:&};:"}
-	lower := strings.ToLower(cmd)
-	for _, d := range dangerous {
-		if strings.Contains(lower, d) {
-			return true
+	var lastRole string
+	for _, msg := range history {
+		if msg.Role == lastRole || strings.TrimSpace(msg.Content) == "" {
+			continue
 		}
+		messages = append(messages, llm.Message{
+			Role:    msg.Role,
+			Content: msg.Content,
+		})
+		lastRole = msg.Role
 	}
-	return false
+
+	if lastRole == "assistant" {
+		messages = append(messages, llm.Message{
+			Role:    "user",
+			Content: "Continue",
+		})
+	}
+
+	return messages
 }
