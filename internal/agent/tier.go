@@ -122,8 +122,7 @@ func parseTierResult(text, query string) *TierResult {
 		result.IsSimple = true
 	}
 
-	lines := strings.Split(text, "
-")
+	lines := strings.Split(text, "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "TIER:") {
@@ -380,21 +379,13 @@ func (te *TierExecutor) runTier3(ctx context.Context, chatID int64, task string,
 
 func buildTier1SystemPrompt(isSimple bool) string {
 	var sb strings.Builder
-	sb.WriteString("You are XLI-Go Bot, a helpful AI assistant.
-
-")
-	sb.WriteString("CRITICAL RULES:
-")
-	sb.WriteString("1. Be CONCISE. 2-3 sentences max unless asked for details.
-")
-	sb.WriteString("2. If user asks for code, write it inline in markdown blocks.
-")
-	sb.WriteString("3. Do NOT use any tools. Just answer directly.
-")
-	sb.WriteString("4. If user says 'simple' or 'простой', give MINIMAL solution (1 file, <50 lines).
-")
-	sb.WriteString("5. NO venv, NO pip install, NO complex setup for simple requests.
-")
+	sb.WriteString("You are XLI-Go Bot, a helpful AI assistant.\n")
+	sb.WriteString("CRITICAL RULES:\n")
+	sb.WriteString("1. Be CONCISE. 2-3 sentences max unless asked for details.\n")
+	sb.WriteString("2. If user asks for code, write it inline in markdown blocks.\n")
+	sb.WriteString("3. Do NOT use any tools. Just answer directly.\n")
+	sb.WriteString("4. If user says 'simple' or 'простой', give MINIMAL solution (1 file, <50 lines).\n")
+	sb.WriteString("5. NO venv, NO pip install, NO complex setup for simple requests.\n")
 	return sb.String()
 }
 
@@ -402,83 +393,45 @@ func (te *TierExecutor) buildTier2Messages(history []memory.Message, task, skill
 	var messages []llm.Message
 
 	var sb strings.Builder
-	sb.WriteString("You are XLI-Go Bot, an AI assistant with tools.
+	sb.WriteString("You are XLI-Go Bot, an AI assistant with tools.\n")
+	sb.WriteString("CRITICAL RULES:\n")
+	sb.WriteString("1. Be CONCISE. Use tools efficiently.\n")
+	sb.WriteString("2. Use file.write for code, NEVER write code in text response.\n")
+	sb.WriteString("3. Use thinking.note to plan briefly (1 sentence).\n")
+	sb.WriteString("4. If user said 'simple' or 'простой': 1 file, <50 lines, NO dependencies.\n")
+	sb.WriteString("5. Use ```tool_call format for tools.\n")
+	sb.WriteString("6. After writing .go, you may compile with terminal.run.\n")
+	sb.WriteString("7. Use archive.create to pack multiple files.\n")
+	sb.WriteString("8. STOP when task is done. Do not over-engineer.\n")
 
-")
-	sb.WriteString("CRITICAL RULES:
-")
-	sb.WriteString("1. Be CONCISE. Use tools efficiently.
-")
-	sb.WriteString("2. Use file.write for code, NEVER write code in text response.
-")
-	sb.WriteString("3. Use thinking.note to plan briefly (1 sentence).
-")
-	sb.WriteString("4. If user said 'simple' or 'простой': 1 file, <50 lines, NO dependencies.
-")
-	sb.WriteString("5. Use ```tool_call format for tools.
-")
-	sb.WriteString("6. After writing .go, you may compile with terminal.run.
-")
-	sb.WriteString("7. Use archive.create to pack multiple files.
-")
-	sb.WriteString("8. STOP when task is done. Do not over-engineer.
-")
-
-	sb.WriteString("
-Built-in tools:
-")
-	sb.WriteString("```tool_call
-")
+	sb.WriteString("\nBuilt-in tools:")
+	sb.WriteString("```tool_call\n")
 	sb.WriteString(`{"tool":"thinking.note","args":{"note":"brief plan"}}`)
-	sb.WriteString("
-```
-")
-	sb.WriteString("```tool_call
-")
+	sb.WriteString("\n```")
+	sb.WriteString("```tool_call\n")
 	sb.WriteString(`{"tool":"terminal.run","args":{"cmd":"command"}}`)
-	sb.WriteString("
-```
-")
-	sb.WriteString("```tool_call
-")
+	sb.WriteString("\n```")
+	sb.WriteString("```tool_call\n")
 	sb.WriteString(`{"tool":"file.read","args":{"path":"/path"}}`)
-	sb.WriteString("
-```
-")
-	sb.WriteString("```tool_call
-")
+	sb.WriteString("\n```")
+	sb.WriteString("```tool_call\n")
 	sb.WriteString(`{"tool":"file.write","args":{"path":"/path","content":"data"}}`)
-	sb.WriteString("
-```
-")
-	sb.WriteString("```tool_call
-")
+	sb.WriteString("\n```")
+	sb.WriteString("```tool_call\n")
 	sb.WriteString(`{"tool":"web.search","args":{"query":"search"}}`)
-	sb.WriteString("
-```
-")
-	sb.WriteString("```tool_call
-")
+	sb.WriteString("\n```")
+	sb.WriteString("```tool_call\n")
 	sb.WriteString(`{"tool":"web.fetch","args":{"url":"https://..."}}`)
-	sb.WriteString("
-```
-")
-	sb.WriteString("```tool_call
-")
+	sb.WriteString("\n```")
+	sb.WriteString("```tool_call\n")
 	sb.WriteString(`{"tool":"archive.create","args":{"source":"/path","name":"archive.zip"}}`)
-	sb.WriteString("
-```
-")
-	sb.WriteString("```tool_call
-")
+	sb.WriteString("\n```")
+	sb.WriteString("```tool_call\n")
 	sb.WriteString(`{"tool":"sandbox.run","args":{"path":"/path/to/script"}}`)
-	sb.WriteString("
-```
-")
+	sb.WriteString("\n```")
 
 	if skillPrompt != "" {
-		sb.WriteString("
-")
+		sb.WriteString("\n")
 		sb.WriteString(skillPrompt)
 	}
 
