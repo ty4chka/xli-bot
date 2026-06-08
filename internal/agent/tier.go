@@ -9,7 +9,6 @@ import (
 
 	"github.com/oblachko/xli-bot/internal/llm"
 	"github.com/oblachko/xli-bot/internal/memory"
-	"github.com/oblachko/xli-bot/internal/skills"
 )
 
 // ExecutionTier — уровень сложности выполнения
