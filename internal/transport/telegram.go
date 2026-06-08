@@ -244,7 +244,11 @@ func (t *TelegramTransport) processAgentRequest(chatID int64, text string) {
 	if len(fullText) <= MaxMessageLength {
 		// Build action buttons based on result
 		keyboard := t.buildActionKeyboard(chatID, text, result)
-		t.editMessageWithKeyboardHTML(chatID, thinkMsg.MessageID, fullText, keyboard)
+		if err := t.editMessageWithKeyboardHTML(chatID, thinkMsg.MessageID, fullText, keyboard); err != nil {
+			log.Printf("[TG] ERROR editing short answer: %v", err)
+			// Fallback: send new message
+			t.sendMessageWithKeyboardHTML(chatID, fullText, keyboard)
+		}
 		log.Printf("[TG] Short answer edited, done")
 		return
 	}
@@ -536,14 +540,21 @@ func (t *TelegramTransport) sendMessageWithKeyboardHTML(chatID int64, text strin
 func (t *TelegramTransport) editHTML(chatID int64, msgID int, text string) {
 	edit := tgbotapi.NewEditMessageText(chatID, msgID, text)
 	edit.ParseMode = tgbotapi.ModeHTML
-	t.bot.Request(edit)
+	if _, err := t.bot.Request(edit); err != nil {
+		log.Printf("[TG] editHTML error: %v", err)
+	}
 }
 
-func (t *TelegramTransport) editMessageWithKeyboardHTML(chatID int64, msgID int, text string, keyboard tgbotapi.InlineKeyboardMarkup) {
+func (t *TelegramTransport) editMessageWithKeyboardHTML(chatID int64, msgID int, text string, keyboard tgbotapi.InlineKeyboardMarkup) error {
 	edit := tgbotapi.NewEditMessageText(chatID, msgID, text)
 	edit.ParseMode = tgbotapi.ModeHTML
 	edit.ReplyMarkup = &keyboard
-	t.bot.Request(edit)
+	resp, err := t.bot.Request(edit)
+	if err != nil {
+		log.Printf("[TG] editMessageWithKeyboardHTML error: %v, resp=%v", err, resp)
+		return err
+	}
+	return nil
 }
 
 func formatToHTML(text string) string {
